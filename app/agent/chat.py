@@ -13,12 +13,15 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.agent.loop import run_agent
 from app.agent.prompts import build_system_prompt
 from app.audit import audit
 from app.config import Settings
 from app.db.enums import MessageRole, RunStatus, RunTrigger
 from app.db.models import AgentRun, Conversation, Message, Project, SystemState
-from app.llm.base import LLMClient, LLMMessage, estimate_cost, normalize_history
+from app.llm.base import LLMClient, LLMMessage, normalize_history
+from app.tools.memory import MEMORY_TOOLS
+from app.tools.registry import ToolContext, ToolRegistry
 
 MSG_STOPPED = "⏸️ Agenti jsou zastavení (vypínač). Zprávu jsem uložil, ale nezpracoval."
 MSG_BUDGET = (
@@ -48,11 +51,16 @@ class ChatReply:
 
 class ChatService:
     def __init__(
-        self, sessions: async_sessionmaker[AsyncSession], llm: LLMClient, settings: Settings
+        self,
+        sessions: async_sessionmaker[AsyncSession],
+        llm: LLMClient,
+        settings: Settings,
+        registry: ToolRegistry | None = None,
     ):
         self.sessions = sessions
         self.llm = llm
         self.settings = settings
+        self.registry = registry or ToolRegistry(MEMORY_TOOLS)
 
     async def handle(self, msg: InboundMessage) -> ChatReply | None:
         """Vrátí odpověď, nebo None, pokud už byla tato zpráva zpracována (duplicita)."""
@@ -68,15 +76,16 @@ class ChatService:
                 return None
 
             conv = await self._get_or_create_conversation(s, msg)
-            s.add(
-                Message(
-                    conversation_id=conv.id,
-                    role=MessageRole.USER,
-                    content=msg.content,
-                    external_id=msg.message_external_id,
-                    source=actor,
-                )
+            user_msg = Message(
+                conversation_id=conv.id,
+                role=MessageRole.USER,
+                content=msg.content,
+                external_id=msg.message_external_id,
+                source=actor,
             )
+            s.add(user_msg)
+            await s.flush()
+            user_msg_id = user_msg.id
             audit(
                 s,
                 actor=actor,
@@ -111,18 +120,29 @@ class ChatService:
             await s.flush()
             run_id = run.id
             conv_id = conv.id
+            ctx = ToolContext(
+                sessions=self.sessions,
+                run_id=run.id,
+                company_id=conv.company_id,
+                project_id=conv.project_id,
+                user_message_id=user_msg_id,
+                actor=actor,
+            )
             project = await s.get(Project, conv.project_id) if conv.project_id else None
             history = await self._history(s, conv_id)
 
-        # --- 2. volání AI (mimo transakci) -----------------------------------------
+        # --- 2. agent: model + nástroje (mimo transakci) -----------------------------
         system = build_system_prompt(datetime.now(UTC).date(), project)
         try:
             result = await asyncio.wait_for(
-                self.llm.complete(
+                run_agent(
+                    llm=self.llm,
+                    registry=self.registry,
+                    ctx=ctx,
                     system=system,
-                    messages=history,
+                    history=history,
                     model=model,
-                    max_tokens=self.settings.llm_max_output_tokens,
+                    settings=self.settings,
                 ),
                 timeout=self.settings.max_run_seconds,
             )
@@ -138,19 +158,16 @@ class ChatService:
             return ChatReply(MSG_ERROR.format(run_id=run_id), run_id, processed=True)
 
         # --- 3. transakce: uložit odpověď a výsledek běhu ---------------------------
-        cost = estimate_cost(
-            self.settings.llm_prices_per_mtok,
-            result.model,
-            result.input_tokens,
-            result.output_tokens,
-        )
+        status = RunStatus.LIMIT_EXCEEDED if result.limit_hit else RunStatus.SUCCESS
         async with self.sessions() as s, s.begin():
             run = await s.get_one(AgentRun, run_id)
-            run.status = RunStatus.SUCCESS
+            run.status = status
             run.model = result.model
-            run.input_tokens = result.input_tokens
-            run.output_tokens = result.output_tokens
-            run.cost_usd = cost
+            run.input_tokens = result.usage.input_tokens
+            run.output_tokens = result.usage.output_tokens
+            run.cost_usd = result.usage.cost_usd
+            run.tool_calls = result.tool_calls
+            run.error = f"limit: {result.limit_hit}" if result.limit_hit else None
             run.finished_at = datetime.now(UTC)
             s.add(
                 Message(
@@ -164,13 +181,14 @@ class ChatService:
             audit(
                 s,
                 actor=f"agent:{run_id}",
-                action="agent_run.success",
+                action=f"agent_run.{status.value}",
                 entity_type="agent_run",
                 entity_id=run_id,
                 company_id=run.company_id,
-                cost_usd=str(cost),
-                input_tokens=result.input_tokens,
-                output_tokens=result.output_tokens,
+                cost_usd=str(result.usage.cost_usd),
+                input_tokens=result.usage.input_tokens,
+                output_tokens=result.usage.output_tokens,
+                tools=[c["tool"] for c in result.tool_calls],
             )
 
         return ChatReply(result.text or "(prázdná odpověď)", run_id, processed=True)

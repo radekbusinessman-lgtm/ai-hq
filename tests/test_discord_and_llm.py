@@ -78,7 +78,13 @@ class FakeMessages:
 async def test_anthropic_adapter_parses_text_and_usage() -> None:
     resp = SimpleNamespace(
         model="claude-sonnet-5-5",
-        content=[SimpleNamespace(type="text", text=" Ahoj "), SimpleNamespace(type="thinking")],
+        content=[
+            SimpleNamespace(type="text", text=" Ahoj "),
+            SimpleNamespace(type="thinking"),
+            SimpleNamespace(
+                type="tool_use", id="tu1", name="search_facts", input={"query": "voda"}
+            ),
+        ],
         usage=SimpleNamespace(input_tokens=12, output_tokens=3),
     )
     msgs = FakeMessages(resp)
@@ -87,6 +93,7 @@ async def test_anthropic_adapter_parses_text_and_usage() -> None:
         system="S", messages=[LLMMessage("user", "Hi")], model="claude-sonnet-5-5", max_tokens=50
     )
     assert (r.text, r.input_tokens, r.output_tokens) == ("Ahoj", 12, 3)
+    assert [(t.name, t.input) for t in r.tool_uses] == [("search_facts", {"query": "voda"})]
     assert msgs.kwargs["system"] == "S" and msgs.kwargs["max_tokens"] == 50
     assert msgs.kwargs["messages"] == [{"role": "user", "content": "Hi"}]
 
@@ -96,3 +103,28 @@ async def test_anthropic_api_error_becomes_llm_error() -> None:
     client = AnthropicClient("test", sdk=SimpleNamespace(messages=FakeMessages(error=err)))
     with pytest.raises(LLMError):
         await client.complete(system="", messages=[], model="m", max_tokens=1)
+
+
+async def test_anthropic_adapter_serializes_tools_and_blocks() -> None:
+    from app.llm.base import TextBlock, ToolResultBlock, ToolSpec, ToolUseBlock
+
+    resp = SimpleNamespace(
+        model="m", content=[], usage=SimpleNamespace(input_tokens=1, output_tokens=1)
+    )
+    msgs = FakeMessages(resp)
+    client = AnthropicClient("test", sdk=SimpleNamespace(messages=msgs))
+    await client.complete(
+        system="",
+        messages=[
+            LLMMessage("user", "Q"),
+            LLMMessage("assistant", [TextBlock("hledám"), ToolUseBlock("a", "x", {"q": 1})]),
+            LLMMessage("user", [ToolResultBlock("a", '{"ok": true}')]),
+        ],
+        model="m",
+        max_tokens=10,
+        tools=[ToolSpec("x", "popis", {"type": "object"})],
+    )
+    sent = msgs.kwargs["messages"]
+    assert sent[1]["content"][1] == {"type": "tool_use", "id": "a", "name": "x", "input": {"q": 1}}
+    assert sent[2]["content"][0]["type"] == "tool_result"
+    assert msgs.kwargs["tools"][0]["name"] == "x"

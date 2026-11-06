@@ -1,6 +1,5 @@
 """Testy zpracování zpráv (bez Discordu a bez skutečného volání Claude – model je simulovaný)."""
 
-import asyncio
 from decimal import Decimal
 
 import pytest
@@ -11,29 +10,9 @@ from app.agent.chat import ChatService, InboundMessage
 from app.config import Settings
 from app.db.enums import MessageRole, RunStatus
 from app.db.models import AgentRun, AuditLog, Conversation, Message, SystemState
-from app.llm.base import LLMError, LLMMessage, LLMResult
+from app.llm.base import LLMError
 from app.seed import seed
-
-
-class FakeLLM:
-    def __init__(
-        self,
-        reply: str = "Dobrý den, jsem připraven.",
-        fail: Exception | None = None,
-        delay: float = 0.0,
-    ):
-        self.reply, self.fail, self.delay = reply, fail, delay
-        self.calls: list[dict[str, object]] = []
-
-    async def complete(
-        self, *, system: str, messages: list[LLMMessage], model: str, max_tokens: int
-    ) -> LLMResult:
-        self.calls.append({"system": system, "messages": messages, "model": model})
-        if self.delay:
-            await asyncio.sleep(self.delay)
-        if self.fail:
-            raise self.fail
-        return LLMResult(self.reply, model, input_tokens=1000, output_tokens=200)
+from tests.fakes import FakeLLM
 
 
 def settings(**kw: object) -> Settings:
