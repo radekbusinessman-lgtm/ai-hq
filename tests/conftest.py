@@ -32,15 +32,23 @@ def migrated_db() -> None:
 
 
 @pytest.fixture
-async def session() -> AsyncIterator[AsyncSession]:
-    """Každý test běží v transakci, která se na konci vrátí – testy se navzájem neovlivní."""
+async def sessions() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Továrna na session v jedné vnější transakci, která se na konci vrátí.
+
+    Kód, který si sám otevírá a commituje transakce (např. ChatService), tak v testech
+    commituje jen do savepointu – testy se navzájem neovlivní.
+    """
     engine = create_async_engine(TEST_DATABASE_URL)
     async with engine.connect() as conn:
         trans = await conn.begin()
-        maker = async_sessionmaker(
+        yield async_sessionmaker(
             bind=conn, expire_on_commit=False, join_transaction_mode="create_savepoint"
         )
-        async with maker() as s:
-            yield s
         await trans.rollback()
     await engine.dispose()
+
+
+@pytest.fixture
+async def session(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[AsyncSession]:
+    async with sessions() as s:
+        yield s

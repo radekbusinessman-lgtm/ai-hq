@@ -3,6 +3,7 @@
 Žádné tajemství se nesmí objevit ve zdrojovém kódu.
 """
 
+from datetime import date
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
@@ -27,6 +28,17 @@ class Settings(BaseSettings):
     llm_model_default: str = "claude-sonnet-5-5"
     llm_model_briefing: str = "claude-opus-5-5"
     voyage_api_key: SecretStr | None = None
+    anthropic_key_expires_on: date | None = None  # pro upozornění v briefingu
+    llm_max_output_tokens: int = 2000
+    conversation_history_messages: int = 20
+
+    # Ceny v USD za 1M tokenů (vstup, výstup). Záměrně opatrné (spíš vyšší) výchozí hodnoty –
+    # skutečné ceny ověřte v Anthropic Console a případně přepište v .env (JSON).
+    llm_prices_per_mtok: dict[str, tuple[Decimal, Decimal]] = {
+        "claude-haiku-5-5": (Decimal("1"), Decimal("5")),
+        "claude-sonnet-5-5": (Decimal("3"), Decimal("15")),
+        "claude-opus-5-5": (Decimal("15"), Decimal("75")),
+    }
 
     monthly_budget_usd: Decimal = Decimal("50")
     budget_warning_pct: int = 80

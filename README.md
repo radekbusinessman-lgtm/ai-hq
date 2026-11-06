@@ -7,7 +7,7 @@ AI: Claude API. Pilotní projekt: **Osada Pomněnice**.
 | Den | Obsah | Stav |
 |---|---|---|
 | 1 | Kostra, databáze, migrace, testy | ✅ otestováno |
-| 2 | Discord bot + Claude + ukládání konverzace | ⏳ |
+| 2 | Discord bot + Claude + ukládání konverzace | ✅ otestováno se simulovaným modelem; čeká na ostré připojení |
 | 3 | Projektová paměť (fakta se zdrojem) | ⏳ |
 | 4 | Úkoly | ⏳ |
 | 5 | Dokumenty a vyhledávání s citací | ⏳ |
@@ -20,7 +20,11 @@ app/
   config.py      nastavení z .env
   db/            datový model (firemní paměť) a připojení
   seed.py        založení firmy a projektu Pomněnice
-  main.py        aplikace (zatím /health)
+  agent/         zpracování zpráv (vypínač, rozpočet, kontext, evidence běhů)
+  llm/           adaptér pro Claude (výměnný za jiný model)
+  discord_bot/   Discord – ověření identity, odpovědi
+  audit.py       zápis do auditního logu
+  main.py        aplikace: /health + Discord bot v jednom procesu
 migrations/      databázové migrace (Alembic)
 tests/           automatické testy (proti skutečnému Postgresu)
 docs/decisions/  záznamy architektonických rozhodnutí

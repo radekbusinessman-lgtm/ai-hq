@@ -17,6 +17,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Identity,
     Index,
     Integer,
     Numeric,
@@ -253,6 +254,8 @@ class Message(RecordMixin, Base):
     conversation_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE"), index=True
     )
+    # Pořadí zpráv – spolehlivější než čas (více zpráv v jedné transakci má stejný čas)
+    seq: Mapped[int] = mapped_column(BigInteger, Identity(always=True), unique=True)
     role: Mapped[MessageRole] = mapped_column(enum_col(MessageRole, "message_role"))
     content: Mapped[str] = mapped_column(Text)
     external_id: Mapped[str | None] = mapped_column(String(100), unique=True)
