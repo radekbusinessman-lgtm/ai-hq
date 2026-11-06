@@ -26,7 +26,14 @@ echo "OK: Docker běží"
 
 # 2. Konfigurace (.env) – kontroluje se jen, že hodnoty nejsou prázdné; nic se nevypisuje
 if [ ! -f .env ]; then
-  echo "CHYBA: chybí soubor .env"; read -r -p "Enter…"; exit 1
+  cp .env.example .env
+  chmod 600 .env
+  echo
+  echo "Vytvořil jsem soubor .env a otevírám ho v TextEditu."
+  echo "Vložte do něj hodnoty ze správce hesel, uložte (⌘S), zavřete"
+  echo "a spusťte tento skript znovu dvojklikem."
+  open -e .env
+  read -r -p "Stiskněte Enter pro zavření…"; exit 0
 fi
 CHYBI=0
 for KLIC in DATABASE_URL DISCORD_BOT_TOKEN DISCORD_GUILD_ID DISCORD_OWNER_USER_ID ANTHROPIC_API_KEY; do
