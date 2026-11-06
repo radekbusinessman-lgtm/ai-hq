@@ -18,7 +18,7 @@ from app.db.session import session_scope
 
 SEED_SOURCE = "seed:zadani-ai-hq"
 
-COMPANY = {"name": "Construction Europe, s.r.o.", "slug": "construction-europe"}
+COMPANY = {"name": "Benet, s.r.o.", "slug": "benet"}
 
 PROJECT = {
     "name": "Osada Pomněnice",

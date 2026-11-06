@@ -40,6 +40,8 @@ async def test_seed_pomnenice_is_idempotent_and_uses_assumptions(session: AsyncS
     p2 = await seed(session)
     assert p1.id == p2.id
     assert "Pomněnice" in p1.aliases
+    owner = await session.get(Company, p1.company_id)
+    assert owner is not None and owner.name == "Benet, s.r.o."
 
     facts = (await session.scalars(select(Fact).where(Fact.project_id == p1.id))).all()
     assert len(facts) == 6
