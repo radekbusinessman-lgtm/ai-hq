@@ -1,0 +1,23 @@
+# Tajemství – NIKDY do Gitu
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Data a nahrané dokumenty
+data/
+backups/
+*.dump
+
+# Systém
+.DS_Store
+*.egg-info/

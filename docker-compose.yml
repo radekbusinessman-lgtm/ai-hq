@@ -1,0 +1,35 @@
+# Spuštění:
+#   produkce (databáze Supabase):   docker compose up -d --build
+#   lokální vývoj (vlastní Postgres): docker compose --profile local up -d --build
+#     a v .env nastavte DATABASE_URL=postgresql+psycopg://aihq:aihq_dev@db:5432/aihq
+
+services:
+  app:
+    build: .
+    env_file: .env
+    restart: unless-stopped        # po pádu nebo restartu počítače se sám spustí
+    ports:
+      - "127.0.0.1:8000:8000"      # API jen z tohoto počítače, nikdy z internetu
+    volumes:
+      - ./data:/app/data           # nahrané dokumenty
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+
+  db:
+    profiles: ["local"]
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aihq
+      POSTGRES_PASSWORD: aihq_dev
+      POSTGRES_DB: aihq
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
