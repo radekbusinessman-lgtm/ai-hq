@@ -98,8 +98,18 @@ class AIHQBot(discord.Client):
         if channel is None:
             log.warning("Kanál #%s nenalezen – zpráva neodeslána", channel_name)
             return False
-        for part in split_message(text):
-            await channel.send(part)
+        try:
+            for part in split_message(text):
+                await channel.send(part)
+        except discord.HTTPException as e:
+            # typicky Forbidden: bot nemá v kanálu oprávnění „Zobrazit kanál“ / „Odesílat zprávy“
+            log.error(
+                "Nelze psát do #%s (%s %s) – zkontrolujte oprávnění bota v kanálu",
+                channel_name,
+                e.status,
+                e.text,
+            )
+            return False
         return True
 
     async def post_event(self, text: str) -> None:
