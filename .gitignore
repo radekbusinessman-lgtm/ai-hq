@@ -22,3 +22,5 @@ backups/
 .DS_Store
 *.egg-info/
 logs/
+backups/
+build/

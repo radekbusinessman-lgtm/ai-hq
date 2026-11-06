@@ -53,6 +53,13 @@ class Settings(BaseSettings):
 
     documents_dir: Path = Path("./data/documents")
 
+    # Discord kanály (podle názvu) a plánované úlohy
+    discord_briefing_channel: str = "chief-of-staff"
+    discord_events_channel: str = "systemove-udalosti"
+    timezone: str = "Europe/Prague"
+    briefing_time: str = "07:30"  # denní briefing (HH:MM, místní čas); prázdné = vypnuto
+    key_expiry_warning_days: int = 14
+
 
 @lru_cache
 def get_settings() -> Settings:

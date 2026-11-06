@@ -9,10 +9,10 @@ AI: Claude API. Pilotní projekt: **Osada Pomněnice**.
 | 1 | Kostra, databáze, migrace, testy | ✅ otestováno |
 | 2 | Discord bot + Claude + ukládání konverzace | ✅ otestováno se simulovaným modelem; čeká na ostré připojení |
 | 3 | Projektová paměť (fakta se zdrojem), nástroje agenta | ✅ otestováno se simulovaným modelem |
-| 4 | Úkoly | ⏳ |
+| 4 | Úkoly (create/list/update) | ✅ otestováno se simulovaným modelem |
 | 5 | Dokumenty a vyhledávání s citací | ⏳ |
-| 6 | Briefing, plánovač, limity, `/stop` | ⏳ |
-| 7 | Nasazení, zálohy, test restartu | ⏳ |
+| 6 | Briefing, plánovač, `/stop` `/start` `/stav` `/briefing`, hlášení, hlídač | ✅ logika otestována; Discord příkazy ověřit naostro |
+| 7 | Mac mini, noční zálohy (ověřena obnova), zablokované Data API Supabase | ✅ / test restartu ⏳ |
 
 ## Struktura
 ```
@@ -54,3 +54,11 @@ curl http://127.0.0.1:8000/health
 - Auditní log je jen pro přidávání – změny a mazání blokuje databáze.
 - Počáteční informace o projektech jsou uloženy jako **předpoklady**, ne ověřená fakta.
 - Každý záznam nese `source` (původ), `created_at` a `updated_at`.
+
+## Provoz na Mac mini
+- Spuštění / aktualizace: dvojklik na `scripts/2-spustit-ai-hq.command`.
+- Služby: `app` (bot + API + plánovač, hlídač restartuje při výpadku Discordu),
+  `backup` (noční `pg_dump` ve 3:00 do `backups/`, 30 dní) – viz `docs/obnova-zalohy.md`.
+- Discord: `/stop` `/start` `/stav` `/briefing`; hlášení v `#systemove-udalosti`,
+  denní briefing v 7:30 v `#chief-of-staff`.
+- Závislosti jsou zamčené v `requirements.lock`.

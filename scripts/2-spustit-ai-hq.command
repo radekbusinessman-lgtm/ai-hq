@@ -46,10 +46,13 @@ if grep -qE "^DATABASE_URL=postgresql://" .env; then
 fi
 if grep -q "YOUR-PASSWORD" .env; then echo "CHYBA: v DATABASE_URL zůstalo [YOUR-PASSWORD]"; CHYBI=1; fi
 [ $CHYBI -eq 0 ] || { echo "Doplňte prosím .env a spusťte znovu."; read -r -p "Enter…"; exit 1; }
+if ! grep -qE "^ANTHROPIC_KEY_EXPIRES_ON=[0-9]{4}-[0-9]{2}-[0-9]{2}" .env; then
+  echo "UPOZORNĚNÍ: ANTHROPIC_KEY_EXPIRES_ON není vyplněno – bot vás neupozorní na vypršení klíče."
+fi
 
 # 3. Sestavení a spuštění (migrace databáze proběhnou automaticky při startu)
 echo; echo "Sestavuji a spouštím (první spuštění trvá několik minut)…"
-docker compose up -d --build || { echo "CHYBA při spuštění"; read -r -p "Enter…"; exit 1; }
+docker compose up -d --build --remove-orphans || { echo "CHYBA při spuštění"; read -r -p "Enter…"; exit 1; }
 
 # 4. Čekání na zdravý stav
 echo "Čekám na aplikaci…"

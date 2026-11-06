@@ -5,23 +5,31 @@ otestovat i bez připojení k Discordu a později použít i z webového dashboa
 """
 
 import asyncio
+import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.loop import run_agent
 from app.agent.prompts import build_system_prompt
+from app.agent.state import agents_enabled, claim_once, month_start, spent_this_month
 from app.audit import audit
 from app.config import Settings
 from app.db.enums import MessageRole, RunStatus, RunTrigger
-from app.db.models import AgentRun, Conversation, Message, Project, SystemState
+from app.db.models import AgentRun, Conversation, Message, Project
 from app.llm.base import LLMClient, LLMMessage, normalize_history
 from app.tools.memory import MEMORY_TOOLS
 from app.tools.registry import ToolContext, ToolRegistry
+from app.tools.tasks import TASK_TOOLS
+
+log = logging.getLogger(__name__)
+
+Notifier = Callable[[str], Awaitable[None]]
 
 MSG_STOPPED = "⏸️ Agenti jsou zastavení (vypínač). Zprávu jsem uložil, ale nezpracoval."
 MSG_BUDGET = (
@@ -40,6 +48,9 @@ class InboundMessage:
     message_external_id: str  # ID zprávy – ochrana proti dvojímu zpracování
     author_external_id: str
     content: str
+    trigger: RunTrigger = RunTrigger.DISCORD_MESSAGE
+    model: str | None = None  # None = výchozí model
+    actor: str | None = None  # None = user:<channel>:<author>
 
 
 @dataclass(frozen=True)
@@ -56,16 +67,34 @@ class ChatService:
         llm: LLMClient,
         settings: Settings,
         registry: ToolRegistry | None = None,
+        notify: Notifier | None = None,
     ):
         self.sessions = sessions
         self.llm = llm
         self.settings = settings
-        self.registry = registry or ToolRegistry(MEMORY_TOOLS)
+        self.registry = registry or ToolRegistry(MEMORY_TOOLS + TASK_TOOLS)
+        self.notify = notify  # hlášení do #systemove-udalosti (chyby, rozpočet)
+
+    async def _notify(self, text: str) -> None:
+        if self.notify is None:
+            return
+        try:
+            await self.notify(text)
+        except Exception:  # noqa: BLE001 – hlášení nesmí shodit zpracování
+            log.exception("Nepodařilo se odeslat systémové hlášení")
 
     async def handle(self, msg: InboundMessage) -> ChatReply | None:
         """Vrátí odpověď, nebo None, pokud už byla tato zpráva zpracována (duplicita)."""
-        actor = f"user:{msg.channel}:{msg.author_external_id}"
-        model = self.settings.llm_model_default
+        try:
+            return await self._handle(msg)
+        except IntegrityError:
+            # souběžné doručení téže zprávy – druhé zpracování se zahodí
+            log.info("Duplicitní zpráva %s zahozena", msg.message_external_id)
+            return None
+
+    async def _handle(self, msg: InboundMessage) -> ChatReply | None:
+        actor = msg.actor or f"user:{msg.channel}:{msg.author_external_id}"
+        model = msg.model or self.settings.llm_model_default
 
         # --- 1. transakce: uložit zprávu, kontroly, založit běh -------------------
         async with self.sessions() as s, s.begin():
@@ -95,10 +124,10 @@ class ChatService:
                 company_id=conv.company_id,
             )
 
-            if not await self._agents_enabled(s):
+            if not await agents_enabled(s):
                 return ChatReply(MSG_STOPPED, None, processed=False)
 
-            spent = await self._spent_this_month(s)
+            spent = await spent_this_month(s)
             if spent >= self.settings.monthly_budget_usd:
                 audit(s, actor="system", action="budget.blocked", spent_usd=str(spent))
                 return ChatReply(
@@ -111,7 +140,7 @@ class ChatService:
 
             run = AgentRun(
                 company_id=conv.company_id,
-                trigger=RunTrigger.DISCORD_MESSAGE,
+                trigger=msg.trigger,
                 idempotency_key=f"{msg.channel}:{msg.message_external_id}",
                 model=model,
                 source=actor,
@@ -148,6 +177,7 @@ class ChatService:
             )
         except TimeoutError:
             await self._finish_failed(run_id, RunStatus.LIMIT_EXCEEDED, "timeout")
+            await self._notify(f"⏱️ Běh `{run_id}` překročil časový limit.")
             return ChatReply(
                 MSG_TIMEOUT.format(seconds=self.settings.max_run_seconds, run_id=run_id),
                 run_id,
@@ -155,6 +185,7 @@ class ChatService:
             )
         except Exception as e:  # noqa: BLE001 – každou chybu chceme zaznamenat
             await self._finish_failed(run_id, RunStatus.ERROR, f"{type(e).__name__}: {e}")
+            await self._notify(f"⚠️ Běh `{run_id}` skončil chybou: `{type(e).__name__}`")
             return ChatReply(MSG_ERROR.format(run_id=run_id), run_id, processed=True)
 
         # --- 3. transakce: uložit odpověď a výsledek běhu ---------------------------
@@ -191,7 +222,23 @@ class ChatService:
                 tools=[c["tool"] for c in result.tool_calls],
             )
 
+        await self._check_budget_warning()
         return ChatReply(result.text or "(prázdná odpověď)", run_id, processed=True)
+
+    async def _check_budget_warning(self) -> None:
+        """Jednou za měsíc upozorní, když útrata překročí BUDGET_WARNING_PCT rozpočtu."""
+        budget = self.settings.monthly_budget_usd
+        async with self.sessions() as s, s.begin():
+            spent = await spent_this_month(s)
+            if budget <= 0 or spent * 100 < budget * self.settings.budget_warning_pct:
+                return
+            key = f"budget_warned:{month_start().strftime('%Y-%m')}"
+            if not await claim_once(s, key, "system"):
+                return
+        await self._notify(
+            f"💸 Útrata za AI tento měsíc: {spent:.2f} USD z {budget} USD "
+            f"({self.settings.budget_warning_pct} % rozpočtu překročeno)."
+        )
 
     # ------------------------------------------------------------------ pomocné
 
@@ -223,19 +270,6 @@ class ChatService:
         if not name:
             return None
         return await s.scalar(select(Project).where(Project.slug == name.lower()).limit(1))
-
-    async def _agents_enabled(self, s: AsyncSession) -> bool:
-        value = await s.scalar(select(SystemState.value).where(SystemState.key == "agents_enabled"))
-        return value is not False  # chybějící záznam = povoleno
-
-    async def _spent_this_month(self, s: AsyncSession) -> Decimal:
-        month_start = datetime.now(UTC).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        total = await s.scalar(
-            select(func.coalesce(func.sum(AgentRun.cost_usd), 0)).where(
-                AgentRun.started_at >= month_start
-            )
-        )
-        return Decimal(total or 0)
 
     async def _history(self, s: AsyncSession, conv_id: uuid.UUID) -> list[LLMMessage]:
         rows = (

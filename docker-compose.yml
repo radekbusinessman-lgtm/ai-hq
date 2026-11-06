@@ -3,20 +3,41 @@
 #   lokální vývoj (vlastní Postgres): docker compose --profile local up -d --build
 #     a v .env nastavte DATABASE_URL=postgresql+psycopg://aihq:aihq_dev@db:5432/aihq
 
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"   # rotace logů – max. 5 × 10 MB na službu
+    max-file: "5"
+
 services:
   app:
     build: .
     env_file: .env
-    restart: unless-stopped        # po pádu nebo restartu počítače se sám spustí
+    restart: unless-stopped        # po pádu nebo restartu Dockeru se sám spustí
     ports:
       - "127.0.0.1:8000:8000"      # API jen z tohoto počítače, nikdy z internetu
     volumes:
       - ./data:/app/data           # nahrané dokumenty
+    logging: *logging
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 60s
       timeout: 10s
       retries: 3
+
+  backup:
+    image: postgres:17-alpine      # pg_dump 17 umí zálohovat Postgres 15–17 (Supabase)
+    env_file: .env
+    environment:
+      TZ: Europe/Prague
+      BACKUP_HOUR: "3"
+      BACKUP_KEEP_DAYS: "30"
+    restart: unless-stopped
+    entrypoint: ["sh", "/scripts/backup.sh"]
+    volumes:
+      - ./scripts/backup.sh:/scripts/backup.sh:ro
+      - ./backups:/backups
+    logging: *logging
 
   db:
     profiles: ["local"]
@@ -30,6 +51,7 @@ services:
       - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    logging: *logging
 
 volumes:
   pgdata:
