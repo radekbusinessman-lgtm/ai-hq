@@ -12,4 +12,6 @@ def test_health_reports_db_and_kill_switch() -> None:
         "database": "ok",
         "discord": "disabled",
         "agents_enabled": True,
+        "schema": "0003",
+        "tables_without_rls": 0,
     }

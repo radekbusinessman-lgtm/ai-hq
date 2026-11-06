@@ -95,6 +95,13 @@ async def health() -> JSONResponse:
     async with session_scope() as s:
         await s.execute(text("SELECT 1"))
         enabled = await agents_enabled(s)
+        schema = await s.scalar(text("SELECT version_num FROM alembic_version"))
+        unprotected = await s.scalar(
+            text(
+                "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = 'public' AND c.relkind = 'r' AND NOT c.relrowsecurity"
+            )
+        )
     bot = app.state.bot if hasattr(app.state, "bot") else None
     discord_state = "disabled" if bot is None else ("connected" if bot.connected else "offline")
     body: dict[str, Any] = {
@@ -102,5 +109,7 @@ async def health() -> JSONResponse:
         "database": "ok",
         "discord": discord_state,
         "agents_enabled": enabled,
+        "schema": schema,
+        "tables_without_rls": unprotected,
     }
     return JSONResponse(body, status_code=503 if discord_state == "offline" else 200)
