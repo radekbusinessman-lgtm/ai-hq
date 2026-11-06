@@ -9,7 +9,10 @@ RUN useradd --create-home --uid 1000 aihq
 COPY pyproject.toml alembic.ini ./
 COPY app ./app
 COPY migrations ./migrations
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir . \
+    # soubory musí být čitelné pro neprivilegovaného uživatele bez ohledu na práva na hostiteli
+    && chmod -R a+rX /app \
+    && mkdir -p /app/data && chown aihq:aihq /app/data
 
 USER aihq
 EXPOSE 8000
