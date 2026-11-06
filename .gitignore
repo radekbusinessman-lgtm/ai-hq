@@ -21,3 +21,4 @@ backups/
 # Systém
 .DS_Store
 *.egg-info/
+logs/
