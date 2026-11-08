@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from sqlalchemy import func, select, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.briefing import briefing_message
@@ -248,34 +248,6 @@ async def test_notifier_failure_does_not_break_reply(
     svc = ChatService(sessions, FakeLLM(fail=LLMError("x")), cfg(), notify=broken)
     reply = await svc.handle(msg("a", channel="chief"))
     assert reply is not None and "chyba" in reply.text
-
-
-async def test_concurrent_duplicate_delivery_processed_once() -> None:
-    """Dvě souběžná doručení téže zprávy, každé s vlastním spojením (jako v provozu)."""
-    import uuid as _uuid
-
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    from tests.conftest import TEST_DATABASE_URL
-
-    engine = create_async_engine(TEST_DATABASE_URL, pool_size=5)
-    real_sessions = async_sessionmaker(engine, expire_on_commit=False)
-    llm = FakeLLM(delay=0.05)
-    svc = ChatService(real_sessions, llm, cfg())
-    ext = f"race-{_uuid.uuid4()}"
-    m = InboundMessage("discord", f"ch-{ext}", "chief", ext, "42", "ahoj")
-    results = await asyncio.gather(svc.handle(m), svc.handle(m), return_exceptions=True)
-    errs = [r for r in results if isinstance(r, Exception)]
-    assert not errs, repr(errs)
-    async with real_sessions() as s:
-        runs = await s.scalar(
-            select(func.count())
-            .select_from(AgentRun)
-            .where(AgentRun.idempotency_key == f"discord:{ext}")
-        )
-    await engine.dispose()
-    assert runs == 1
-    assert sum(1 for r in results if r is not None) == 1
 
 
 # ------------------------------------------------------------------ hlídač

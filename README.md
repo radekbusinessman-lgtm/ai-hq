@@ -59,6 +59,8 @@ curl http://127.0.0.1:8000/health
 - Spuštění / aktualizace: dvojklik na `scripts/2-spustit-ai-hq.command`.
 - Služby: `app` (bot + API + plánovač, hlídač restartuje při výpadku Discordu),
   `backup` (noční `pg_dump` ve 3:00 do `backups/`, 30 dní) – viz `docs/obnova-zalohy.md`.
+- Schvalování: akce úrovně 2 (zatím nahrazení faktu) se provedou až po ✅ v Discordu;
+  žádost platí 24 h, ověřuje se otisk obsahu, o žádosti lze rozhodnout jen jednou.
 - Discord: `/stop` `/start` `/stav` `/briefing`; hlášení v `#systemove-udalosti`,
   denní briefing v 7:30 v `#chief-of-staff`.
 - Závislosti jsou zamčené v `requirements.lock`.

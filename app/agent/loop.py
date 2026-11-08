@@ -17,7 +17,7 @@ from app.llm.base import (
     Usage,
     estimate_cost,
 )
-from app.tools.registry import ToolContext, ToolRegistry
+from app.tools.registry import ApprovalRequest, ToolContext, ToolRegistry
 
 MSG_STEP_LIMIT = (
     "⚠️ Úloha vyžadovala víc než {n} kroků a byla zastavena kvůli limitu. "
@@ -33,6 +33,7 @@ class LoopResult:
     usage: Usage
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     limit_hit: str | None = None  # "steps" | "cost" | None
+    approvals: list[ApprovalRequest] = field(default_factory=list)
 
 
 async def run_agent(
@@ -48,6 +49,7 @@ async def run_agent(
     messages = list(history)
     usage = Usage()
     tool_log: list[dict[str, Any]] = []
+    approvals: list[ApprovalRequest] = []
     used_model = model
     max_steps = settings.max_tool_steps_per_run
 
@@ -67,7 +69,7 @@ async def run_agent(
         )
 
         if not result.tool_uses:
-            return LoopResult(result.text, used_model, usage, tool_log)
+            return LoopResult(result.text, used_model, usage, tool_log, approvals=approvals)
 
         if usage.cost_usd >= settings.max_run_cost_usd:
             return LoopResult(
@@ -76,6 +78,7 @@ async def run_agent(
                 usage,
                 tool_log,
                 limit_hit="cost",
+                approvals=approvals,
             )
         if step == max_steps:
             break
@@ -95,9 +98,16 @@ async def run_agent(
                     "ms": int((time.monotonic() - started) * 1000),
                 }
             )
+            if outcome.approval is not None:
+                approvals.append(outcome.approval)
             results.append(ToolResultBlock(call.id, outcome.content, outcome.is_error))
         messages.append(LLMMessage("user", results))
 
     return LoopResult(
-        MSG_STEP_LIMIT.format(n=max_steps), used_model, usage, tool_log, limit_hit="steps"
+        MSG_STEP_LIMIT.format(n=max_steps),
+        used_model,
+        usage,
+        tool_log,
+        limit_hit="steps",
+        approvals=approvals,
     )

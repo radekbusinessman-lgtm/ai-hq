@@ -2,6 +2,7 @@
 
 import re
 import unicodedata
+import uuid
 from typing import Any
 
 from sqlalchemy import func, or_, select
@@ -10,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.audit import audit
 from app.db.enums import FactStatus, PermissionLevel
 from app.db.models import Company, Fact, Project
-from app.tools.registry import Tool, ToolContext, ToolInputError
+from app.tools.registry import Prepared, Tool, ToolContext, ToolInputError
 
 # Model smí ukládat jen tyto stavy. "outdated" vzniká pouze nahrazením faktu (se schválením).
 SAVABLE_STATUSES = [
@@ -48,6 +49,29 @@ async def resolve_project(s: AsyncSession, ctx: ToolContext, name: str | None) -
         if any(_strip_accents(n.lower()) == needle for n in names):
             return p
     raise ToolInputError(f"Projekt '{name}' neznám. Použij list_projects.")
+
+
+STATUS_CZ = {
+    "verified": "ověřeno",
+    "assumption": "předpoklad",
+    "ai_estimate": "odhad AI",
+    "user_decision": "rozhodnutí",
+    "outdated": "neaktuální",
+}
+
+
+async def find_fact(s: AsyncSession, ref: str) -> Fact:
+    prefix = ref.strip().upper().removeprefix("F-").lower()
+    if len(prefix) < 6 or not all(c in "0123456789abcdef" for c in prefix):
+        raise ToolInputError(f"Neplatná reference faktu '{ref}' (očekávám např. F-1a2b3c4d).")
+    facts = (await s.scalars(select(Fact))).all()
+    matches = [f for f in facts if str(f.id).replace("-", "").startswith(prefix)]
+    if not matches:
+        raise ToolInputError(f"Fakt {ref} neexistuje.")
+    if len(matches) > 1:
+        raise ToolInputError(f"Reference {ref} není jednoznačná.")
+    found: Fact = matches[0]
+    return found
 
 
 def _fact_dict(f: Fact, project_name: str) -> dict[str, Any]:
@@ -157,6 +181,96 @@ async def save_fact(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     return {"ulozeno": True, "ref": ref, "projekt": project.name, "stav": status}
 
 
+async def prepare_supersede_fact(ctx: ToolContext, args: dict[str, Any]) -> Prepared:
+    """Ověří návrh náhrady faktu a připraví přesné parametry + čitelný souhrn ke schválení."""
+    new_status = str(args.get("new_status") or "")
+    if new_status not in SAVABLE_STATUSES:
+        raise ToolInputError(
+            f"Neplatný stav '{new_status}'. Povolené: {', '.join(SAVABLE_STATUSES)}."
+        )
+    source_note = str(args.get("source_note") or "").strip()
+    if new_status == FactStatus.VERIFIED.value and not source_note:
+        raise ToolInputError("Ověřený fakt musí mít uvedený zdroj (source_note).")
+    reason = str(args.get("reason") or "").strip()
+    if not reason:
+        raise ToolInputError("Uveď důvod změny (reason).")
+    async with ctx.sessions() as s:
+        old = await find_fact(s, str(args.get("ref") or ""))
+        if old.status == FactStatus.OUTDATED or old.superseded_by_id is not None:
+            raise ToolInputError("Tento fakt už je neaktuální / nahrazený.")
+        project = await s.get(Project, old.project_id) if old.project_id else None
+    new_statement = str(args.get("new_statement") or "").strip() or old.statement
+    if new_statement == old.statement and new_status == old.status.value:
+        raise ToolInputError("Návrh nic nemění (stejné tvrzení i stav).")
+    summary = (
+        f"🔁 **Nahradit fakt {fact_ref(old.id)}**"
+        f"{' (' + project.name + ')' if project else ''}\n"
+        f"Původně: {old.statement} _({STATUS_CZ[old.status.value]})_\n"
+        f"Nově: {new_statement} _({STATUS_CZ[new_status]})_"
+        f"{' — zdroj: ' + source_note if source_note else ''}\n"
+        f"Důvod: {reason}"
+    )
+    return Prepared(
+        summary=summary,
+        args={
+            "fact_id": str(old.id),
+            "expected_statement": old.statement,
+            "expected_status": old.status.value,
+            "new_statement": new_statement,
+            "new_status": new_status,
+            "source_note": source_note,
+            "reason": reason,
+        },
+        company_id=old.company_id,
+    )
+
+
+async def supersede_fact(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    """Provede schválenou náhradu: starý fakt → neaktuální, nový fakt s odkazem na původní."""
+    async with ctx.sessions() as s, s.begin():
+        old = await s.get(Fact, uuid.UUID(args["fact_id"]), with_for_update=True)
+        if old is None:
+            raise ToolInputError("Původní fakt už neexistuje.")
+        if (
+            old.statement != args["expected_statement"]
+            or old.status.value != args["expected_status"]
+            or old.superseded_by_id is not None
+        ):
+            raise ToolInputError("Fakt se mezitím změnil – navrhněte změnu znovu.")
+        source = f"{ctx.actor} via agent_run:{ctx.run_id}"
+        if args.get("source_note"):
+            source += f" | {args['source_note'][:100]}"
+        new = Fact(
+            company_id=old.company_id,
+            project_id=old.project_id,
+            topic=old.topic,
+            statement=args["new_statement"],
+            status=FactStatus(args["new_status"]),
+            source_message_id=ctx.user_message_id,
+            source=source[:200],
+        )
+        s.add(new)
+        await s.flush()
+        old.status = FactStatus.OUTDATED
+        old.superseded_by_id = new.id
+        audit(
+            s,
+            actor=ctx.actor,
+            action="fact.superseded",
+            entity_type="fact",
+            entity_id=old.id,
+            company_id=old.company_id,
+            new_fact=str(new.id),
+            reason=args.get("reason"),
+        )
+        return {
+            "nahrazeno": True,
+            "stary_ref": fact_ref(old.id),
+            "novy_ref": fact_ref(new.id),
+            "stav": args["new_status"],
+        }
+
+
 # ---------------------------------------------------------------- definice
 
 PROJECT_PARAM = {
@@ -223,5 +337,31 @@ MEMORY_TOOLS = [
         },
         level=PermissionLevel.AUTO,
         handler=save_fact,
+    ),
+    Tool(
+        name="supersede_fact",
+        description=(
+            "Navrhne nahrazení existujícího faktu (oprava údaje nebo změna stavu, např. "
+            "předpoklad → ověřeno). VYŽADUJE SCHVÁLENÍ: nic se neprovede, uživatel dostane "
+            "tlačítka ✅/❌. Původní fakt se po schválení označí jako neaktuální a zůstane "
+            "v historii. Netvrď, že je změna provedena – je jen navržena."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "ref": {"type": "string", "description": "Reference faktu, např. F-1a2b3c4d."},
+                "new_statement": {
+                    "type": "string",
+                    "description": "Nové znění. Vynech, pokud se mění jen stav.",
+                },
+                "new_status": {"type": "string", "enum": SAVABLE_STATUSES},
+                "source_note": {"type": "string", "description": "Zdroj; povinný pro verified."},
+                "reason": {"type": "string", "description": "Proč se fakt mění."},
+            },
+            "required": ["ref", "new_status", "reason"],
+        },
+        level=PermissionLevel.APPROVAL,
+        handler=supersede_fact,
+        prepare=prepare_supersede_fact,
     ),
 ]

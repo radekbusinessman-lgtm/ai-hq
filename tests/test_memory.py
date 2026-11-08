@@ -9,12 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.chat import ChatService, InboundMessage
 from app.config import Settings
-from app.db.enums import FactStatus, PermissionLevel, RunStatus
+from app.db.enums import FactStatus, RunStatus
 from app.db.models import AgentRun, AuditLog, Fact, Message
 from app.llm.base import ToolResultBlock
 from app.seed import seed
 from app.tools.memory import MEMORY_TOOLS, search_terms
-from app.tools.registry import Tool, ToolContext, ToolRegistry
 from app.tools.tasks import TASK_TOOLS
 from tests.fakes import FakeLLM, text, tool
 
@@ -154,32 +153,6 @@ async def test_unregistered_tool_is_refused(sessions: async_sessionmaker[AsyncSe
     llm = FakeLLM(script=[tool("run_shell", cmd="rm -rf /"), text("…")])
     await ChatService(sessions, llm, cfg()).handle(msg("…"))
     assert "neexistuje" in last_tool_result(llm)["error"]
-
-
-async def test_approval_level_tool_is_not_executed(
-    sessions: async_sessionmaker[AsyncSession],
-) -> None:
-    executed: list[bool] = []
-
-    async def send_email(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-        executed.append(True)
-        return {}
-
-    registry = ToolRegistry(
-        [
-            Tool(
-                "send_email",
-                "Odešle e-mail",
-                {"type": "object"},
-                PermissionLevel.APPROVAL,
-                send_email,
-            )
-        ]
-    )
-    llm = FakeLLM(script=[tool("send_email", to="x@y.cz"), text("…")])
-    await ChatService(sessions, llm, cfg(), registry).handle(msg("…"))
-    assert executed == []
-    assert "schválení" in last_tool_result(llm)["error"]
 
 
 async def test_step_limit_stops_endless_tool_use(

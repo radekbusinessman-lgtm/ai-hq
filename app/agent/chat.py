@@ -24,7 +24,7 @@ from app.db.enums import MessageRole, RunStatus, RunTrigger
 from app.db.models import AgentRun, Conversation, Message, Project
 from app.llm.base import LLMClient, LLMMessage, normalize_history
 from app.tools.memory import MEMORY_TOOLS
-from app.tools.registry import ToolContext, ToolRegistry
+from app.tools.registry import ApprovalRequest, ToolContext, ToolRegistry
 from app.tools.tasks import TASK_TOOLS
 
 log = logging.getLogger(__name__)
@@ -58,6 +58,7 @@ class ChatReply:
     text: str
     run_id: uuid.UUID | None
     processed: bool  # False = nezpracováno AI (vypínač, rozpočet)
+    approvals: tuple[ApprovalRequest, ...] = ()  # akce čekající na schválení tlačítkem
 
 
 class ChatService:
@@ -156,6 +157,8 @@ class ChatService:
                 project_id=conv.project_id,
                 user_message_id=user_msg_id,
                 actor=actor,
+                # akce ke schválení smí navrhovat jen běh vyvolaný přímo uživatelem
+                allow_approval_requests=msg.trigger == RunTrigger.DISCORD_MESSAGE,
             )
             project = await s.get(Project, conv.project_id) if conv.project_id else None
             history = await self._history(s, conv_id)
@@ -223,7 +226,12 @@ class ChatService:
             )
 
         await self._check_budget_warning()
-        return ChatReply(result.text or "(prázdná odpověď)", run_id, processed=True)
+        return ChatReply(
+            result.text or "(prázdná odpověď)",
+            run_id,
+            processed=True,
+            approvals=tuple(result.approvals),
+        )
 
     async def _check_budget_warning(self) -> None:
         """Jednou za měsíc upozorní, když útrata překročí BUDGET_WARNING_PCT rozpočtu."""

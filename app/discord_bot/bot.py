@@ -10,11 +10,13 @@ import logging
 import time
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
 
+from app.agent.approvals import ApprovalService
 from app.agent.briefing import briefing_message
 from app.agent.chat import ChatService, InboundMessage
 from app.agent.state import (
@@ -25,11 +27,61 @@ from app.agent.state import (
 )
 from app.audit import audit
 from app.config import Settings
+from app.db.enums import ApprovalStatus
+from app.tools.registry import ApprovalRequest
 
 log = logging.getLogger(__name__)
 
 DISCORD_LIMIT = 2000
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.5.0"
+APPROVAL_PREFIX = "aihq:approval:"  # custom_id tlačítek: aihq:approval:<approve|reject>:<uuid>
+
+DECISION_LABEL = {
+    ApprovalStatus.EXECUTED: "✅ **Schváleno a provedeno**",
+    ApprovalStatus.REJECTED: "❌ **Zamítnuto**",
+    ApprovalStatus.EXPIRED: "⌛ **Vypršelo** – nic se neprovedlo",
+    ApprovalStatus.FAILED: "⚠️ **Neprovedeno**",
+}
+
+
+def approval_view(approval_id: uuid.UUID) -> discord.ui.View:
+    """Tlačítka bez vlastních callbacků – kliknutí zpracuje on_interaction podle custom_id,
+    takže fungují i po restartu serveru."""
+    view = discord.ui.View(timeout=None)
+    view.add_item(
+        discord.ui.Button(
+            label="Schválit",
+            emoji="✅",
+            style=discord.ButtonStyle.success,
+            custom_id=f"{APPROVAL_PREFIX}approve:{approval_id}",
+        )
+    )
+    view.add_item(
+        discord.ui.Button(
+            label="Zamítnout",
+            emoji="❌",
+            style=discord.ButtonStyle.danger,
+            custom_id=f"{APPROVAL_PREFIX}reject:{approval_id}",
+        )
+    )
+    return view
+
+
+def parse_approval_custom_id(custom_id: str) -> tuple[bool, uuid.UUID] | None:
+    if not custom_id.startswith(APPROVAL_PREFIX):
+        return None
+    try:
+        action, raw_id = custom_id[len(APPROVAL_PREFIX) :].split(":", 1)
+        if action not in ("approve", "reject"):
+            return None
+        return action == "approve", uuid.UUID(raw_id)
+    except ValueError:
+        return None
+
+
+def approval_card(req: ApprovalRequest, tz: str) -> str:
+    until = req.expires_at.astimezone(ZoneInfo(tz)).strftime("%-d. %-m. %H:%M")
+    return f"🛂 **Ke schválení** [{req.ref}] · platí do {until}\n{req.summary}"
 
 
 def is_authorized(
@@ -70,6 +122,7 @@ class AIHQBot(discord.Client):
         super().__init__(intents=intents)
         self.chat = chat
         self.settings = settings
+        self.approvals = ApprovalService(chat.sessions, chat.registry)
         self.tree = app_commands.CommandTree(self)
         self.started_at = time.monotonic()
         self.last_ready_at: float | None = None
@@ -168,6 +221,40 @@ class AIHQBot(discord.Client):
                 await message.reply(part, mention_author=False)
             else:
                 await message.channel.send(part)
+        for req in reply.approvals:
+            view = approval_view(req.id)
+            await message.channel.send(approval_card(req, self.settings.timezone), view=view)
+            view.stop()  # klik zpracuje on_interaction (i po restartu)
+
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        if interaction.type != discord.InteractionType.component:
+            return
+        data: dict[str, Any] = dict(interaction.data or {})
+        custom_id = str(data.get("custom_id", ""))
+        parsed = parse_approval_custom_id(custom_id)
+        if parsed is None:
+            return
+        approve, approval_id = parsed
+        if not self._owner_only(interaction):
+            await self._log_rejected(interaction.user.id, interaction.guild_id)
+            await interaction.response.send_message("Nemáte oprávnění.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        decision = await self.approvals.decide(
+            approval_id, approve=approve, actor=f"user:discord:{interaction.user.id}"
+        )
+        label = DECISION_LABEL.get(decision.status, f"ℹ️ {decision.status.value}")
+        original = interaction.message.content if interaction.message else ""
+        detail = "" if decision.status == ApprovalStatus.REJECTED else f" – {decision.message}"
+        if decision.status == ApprovalStatus.EXECUTED and decision.result:
+            new_ref = decision.result.get("novy_ref")
+            detail = f" (nový fakt [{new_ref}])" if new_ref else ""
+        try:
+            await interaction.edit_original_response(
+                content=f"{original}\n\n{label}{detail}"[:DISCORD_LIMIT], view=None
+            )
+        except discord.HTTPException:
+            await interaction.followup.send(f"{label}{detail}", ephemeral=True)
 
     async def _log_rejected(self, author_id: int, guild_id: int | None) -> None:
         try:
