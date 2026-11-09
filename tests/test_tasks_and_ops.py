@@ -298,3 +298,35 @@ async def test_run_status_unchanged_for_normal_flow(
     run = await session.get_one(AgentRun, reply.run_id)
     assert run.status == RunStatus.SUCCESS
     await session.execute(update(SystemState).where(SystemState.key == "x").values(value=1))
+
+
+# ------------------------------------------------------------------ zálohy
+
+
+async def test_backup_check_warns_on_old_or_missing_backup(tmp_path: Any) -> None:
+    import os
+
+    from app.scheduler.jobs import backup_check_job
+
+    now = datetime(2026, 11, 9, 8, 5, tzinfo=UTC)
+    settings = cfg(backups_dir=tmp_path)
+
+    bot = FakeBot()
+    await backup_check_job(bot, settings, now)
+    assert len(bot.events) == 1 and "žádná záloha" in bot.events[0]
+
+    fresh = tmp_path / "aihq-2026-11-09.dump"
+    fresh.write_bytes(b"x")
+    os.utime(fresh, (now.timestamp() - 5 * 3600,) * 2)
+    bot = FakeBot()
+    await backup_check_job(bot, settings, now)
+    assert bot.events == []
+
+    os.utime(fresh, (now.timestamp() - 30 * 3600,) * 2)
+    bot = FakeBot()
+    await backup_check_job(bot, settings, now)
+    assert len(bot.events) == 1 and "30 h" in bot.events[0]
+
+    bot = FakeBot()
+    await backup_check_job(bot, cfg(backups_dir=tmp_path / "neexistuje"), now)
+    assert bot.events == []

@@ -40,9 +40,11 @@ fi
 
 log "plánovač záloh spuštěn (denně v $HOUR:00, uchovat $KEEP_DAYS dní)"
 run_backup || true   # první záloha hned po startu (pokud dnes ještě není)
+# Od BACKUP_HOUR se zkouší každých 10 minut, dokud se dnešní záloha nepovede
+# (např. když je v noci výpadek internetu). Po úspěchu se do dalšího dne nic neděje.
 while true; do
     sleep 600
-    if [ "$(date +%H)" -eq "$HOUR" ] 2>/dev/null || [ "$(date +%-H)" = "$HOUR" ]; then
+    if [ "$(date +%-H)" -ge "$HOUR" ] && [ ! -s "$BACKUP_DIR/aihq-$(date +%Y-%m-%d).dump" ]; then
         run_backup || true
     fi
 done

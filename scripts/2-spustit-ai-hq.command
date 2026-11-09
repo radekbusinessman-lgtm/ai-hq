@@ -53,6 +53,8 @@ fi
 # 3. Sestavení a spuštění (migrace databáze proběhnou automaticky při startu)
 echo; echo "Sestavuji a spouštím (první spuštění trvá několik minut)…"
 docker compose up -d --build --remove-orphans || { echo "CHYBA při spuštění"; read -r -p "Enter…"; exit 1; }
+# služba záloh čte skript z disku – restart, aby běžela aktuální verze (a hned dohnala zálohu)
+docker compose restart backup >/dev/null 2>&1 || true
 
 # 4. Čekání na zdravý stav
 echo "Čekám na aplikaci…"

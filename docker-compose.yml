@@ -18,6 +18,7 @@ services:
       - "127.0.0.1:8000:8000"      # API jen z tohoto počítače, nikdy z internetu
     volumes:
       - ./data:/app/data           # nahrané dokumenty
+      - ./backups:/app/backups:ro  # jen ke kontrole stáří záloh (ranní kontrola)
     logging: *logging
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]

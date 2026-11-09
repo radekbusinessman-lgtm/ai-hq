@@ -8,6 +8,7 @@ do jednoho), misfire_grace_time (zmeškaný běh se dožene jen do 1 h).
 
 import logging
 from datetime import date, datetime
+from pathlib import Path
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
@@ -63,6 +64,28 @@ async def daily_checks_job(
     await bot.post_event(text)
 
 
+def newest_backup_age_hours(backups_dir: Path, now: datetime) -> float | None:
+    dumps = [p for p in backups_dir.glob("aihq-*.dump") if p.stat().st_size > 0]
+    if not dumps:
+        return None
+    newest = max(p.stat().st_mtime for p in dumps)
+    return (now.timestamp() - newest) / 3600
+
+
+async def backup_check_job(bot: BotLike, settings: Settings, now: datetime) -> None:
+    """Upozorní, když poslední noční záloha chybí nebo je starší než backup_max_age_hours."""
+    if not settings.backups_dir.exists():
+        return  # složka záloh není připojená (např. vývoj)
+    age = newest_backup_age_hours(settings.backups_dir, now)
+    if age is None:
+        await bot.post_event("⚠️ Nenalezena žádná záloha databáze. Zkontrolujte službu backup.")
+    elif age > settings.backup_max_age_hours:
+        await bot.post_event(
+            f"⚠️ Poslední záloha databáze je {age:.0f} h stará. Zkontrolujte "
+            "~/ai-hq/backups/backup.log (nejčastěji výpadek internetu v noci)."
+        )
+
+
 def build_scheduler(
     bot: BotLike, sessions: async_sessionmaker[AsyncSession], settings: Settings
 ) -> AsyncIOScheduler:
@@ -83,6 +106,7 @@ def build_scheduler(
 
     async def checks() -> None:
         await daily_checks_job(bot, sessions, settings, datetime.now(tz).date())
+        await backup_check_job(bot, settings, datetime.now(tz))
 
     scheduler.add_job(
         checks, CronTrigger(hour=8, minute=5, timezone=tz), id="daily_checks", name="Denní kontroly"

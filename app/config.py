@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     timezone: str = "Europe/Prague"
     briefing_time: str = "07:30"  # denní briefing (HH:MM, místní čas); prázdné = vypnuto
     key_expiry_warning_days: int = 14
+    backups_dir: Path = Path("./backups")
+    backup_max_age_hours: int = 26
 
 
 @lru_cache
