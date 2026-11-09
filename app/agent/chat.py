@@ -24,6 +24,7 @@ from app.db.enums import MessageRole, RunStatus, RunTrigger
 from app.db.models import AgentRun, Conversation, Message, Project
 from app.llm.base import LLMClient, LLMMessage, normalize_history
 from app.tools.memory import MEMORY_TOOLS
+from app.tools.projects import PROJECT_TOOLS
 from app.tools.registry import ApprovalRequest, ToolContext, ToolRegistry
 from app.tools.tasks import TASK_TOOLS
 
@@ -73,7 +74,7 @@ class ChatService:
         self.sessions = sessions
         self.llm = llm
         self.settings = settings
-        self.registry = registry or ToolRegistry(MEMORY_TOOLS + TASK_TOOLS)
+        self.registry = registry or ToolRegistry(MEMORY_TOOLS + TASK_TOOLS + PROJECT_TOOLS)
         self.notify = notify  # hlášení do #systemove-udalosti (chyby, rozpočet)
 
     async def _notify(self, text: str) -> None:

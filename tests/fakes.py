@@ -10,8 +10,8 @@ def text(t: str) -> list[Block]:
     return [TextBlock(t)]
 
 
-def tool(name: str, call_id: str = "t1", **args: Any) -> list[Block]:
-    return [ToolUseBlock(call_id, name, args)]
+def tool(tool_name: str, /, call_id: str = "t1", **args: Any) -> list[Block]:
+    return [ToolUseBlock(call_id, tool_name, args)]
 
 
 class FakeLLM:

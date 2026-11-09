@@ -14,6 +14,7 @@ from app.db.models import AgentRun, AuditLog, Fact, Message
 from app.llm.base import ToolResultBlock
 from app.seed import seed
 from app.tools.memory import MEMORY_TOOLS, search_terms
+from app.tools.projects import PROJECT_TOOLS
 from app.tools.tasks import TASK_TOOLS
 from tests.fakes import FakeLLM, text, tool
 
@@ -181,7 +182,7 @@ async def test_tools_are_offered_to_model(sessions: async_sessionmaker[AsyncSess
     llm = FakeLLM()
     await ChatService(sessions, llm, cfg()).handle(msg("ahoj"))
     names = {t.name for t in llm.calls[0]["tools"]}
-    assert names == {t.name for t in MEMORY_TOOLS + TASK_TOOLS}
+    assert names == {t.name for t in MEMORY_TOOLS + TASK_TOOLS + PROJECT_TOOLS}
 
 
 def test_search_terms_use_word_stems() -> None:

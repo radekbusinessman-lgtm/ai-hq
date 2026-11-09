@@ -33,7 +33,7 @@ from app.tools.registry import ApprovalRequest
 log = logging.getLogger(__name__)
 
 DISCORD_LIMIT = 2000
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.6.0"
 APPROVAL_PREFIX = "aihq:approval:"  # custom_id tlačítek: aihq:approval:<approve|reject>:<uuid>
 
 DECISION_LABEL = {
@@ -249,12 +249,58 @@ class AIHQBot(discord.Client):
         if decision.status == ApprovalStatus.EXECUTED and decision.result:
             new_ref = decision.result.get("novy_ref")
             detail = f" (nový fakt [{new_ref}])" if new_ref else ""
+            if decision.result.get("discord_channel"):
+                detail = " – " + await self.ensure_project_channel(
+                    str(decision.result["discord_channel"])
+                )
         try:
             await interaction.edit_original_response(
                 content=f"{original}\n\n{label}{detail}"[:DISCORD_LIMIT], view=None
             )
         except discord.HTTPException:
             await interaction.followup.send(f"{label}{detail}", ephemeral=True)
+
+    async def ensure_project_channel(self, slug: str) -> str:
+        """Založí soukromý kanál #slug (vidí ho jen vlastník a bot). Vrací text pro uživatele."""
+        guild = self._guild()
+        if guild is None:
+            return "kanál nelze založit (server nenalezen)."
+        existing = discord.utils.get(guild.text_channels, name=slug)
+        if existing is not None:
+            return f"kanál {existing.mention} už existuje."
+        overwrites: dict[
+            discord.Role | discord.Member | discord.Object, discord.PermissionOverwrite
+        ] = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            guild.me: discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, read_message_history=True
+            ),
+        }
+        owner_id = self.settings.discord_owner_user_id
+        owner = guild.get_member(owner_id) if owner_id else None
+        if owner is not None:
+            overwrites[owner] = discord.PermissionOverwrite(view_channel=True)
+        elif owner_id:
+            overwrites[discord.Object(id=owner_id)] = discord.PermissionOverwrite(view_channel=True)
+        template = self.channel_by_name(self.settings.discord_briefing_channel)
+        try:
+            channel = await guild.create_text_channel(
+                slug,
+                overwrites=overwrites,
+                category=template.category if template else None,
+                reason="AI HQ: schválené založení projektu",
+            )
+        except discord.Forbidden:
+            log.error("Bot nemá oprávnění Spravovat kanály – kanál #%s nezaložen", slug)
+            return (
+                f"projekt je založený, ale kanál #{slug} jsem nemohl vytvořit (chybí "
+                "oprávnění „Spravovat kanály“). Založte ho ručně se stejným názvem."
+            )
+        except discord.HTTPException as e:
+            log.error("Založení kanálu #%s selhalo: %s", slug, e)
+            return f"projekt je založený, ale kanál #{slug} se nepodařilo vytvořit."
+        await channel.send(f"👋 Kanál projektu. Vše, co sem napíšete, se týká projektu `{slug}`.")
+        return f"projekt založen, kanál {channel.mention} je připravený."
 
     async def _log_rejected(self, author_id: int, guild_id: int | None) -> None:
         try:

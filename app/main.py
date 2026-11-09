@@ -86,7 +86,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         t.cancel()
 
 
-app = FastAPI(title="AI HQ", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="AI HQ", version="0.6.0", lifespan=lifespan)
 
 
 @app.get("/health")
