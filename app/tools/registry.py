@@ -37,6 +37,9 @@ class ToolContext:
     user_message_id: uuid.UUID | None  # zpráva, která běh vyvolala (zdroj pro fakta)
     actor: str  # kdo běh vyvolal, např. user:discord:123
     allow_approval_requests: bool = True  # False v automatických bězích
+    # Zdroje nedůvěryhodného obsahu, které běh už přečetl (např. „email“). Jakmile je
+    # neprázdné, běh nesmí navrhovat akce ke schválení (ochrana proti prompt injection).
+    tainted_by: set[str] = field(default_factory=set)
 
 
 class ToolInputError(Exception):
@@ -66,6 +69,8 @@ class Tool:
     level: PermissionLevel
     handler: Handler
     prepare: Preparer | None = None  # povinné pro úroveň APPROVAL
+    untrusted_output: str | None = None  # vrací cizí obsah (např. "email") → taint běhu
+    sensitive_output: bool = False  # výstup se neukládá do záznamu běhu (agent_runs)
 
     def spec(self) -> ToolSpec:
         return ToolSpec(self.name, self.description, self.input_schema)
@@ -120,6 +125,8 @@ class ToolRegistry:
             result = await tool.handler(ctx, args)
         except ToolInputError as e:
             return _err(str(e))
+        if tool.untrusted_output:
+            ctx.tainted_by.add(tool.untrusted_output)
         return ToolOutcome(json.dumps(result, ensure_ascii=False, default=str), is_error=False)
 
     async def _request_approval(
@@ -127,6 +134,13 @@ class ToolRegistry:
     ) -> ToolOutcome:
         if not ctx.allow_approval_requests:
             return _err("V automatickém běhu nelze navrhovat akce ke schválení.")
+        if ctx.tainted_by:
+            return _err(
+                "Tento běh už četl cizí obsah ("
+                + ", ".join(sorted(ctx.tainted_by))
+                + "). Z bezpečnostních důvodů (prompt injection) v něm nelze navrhovat akce "
+                "ke schválení. Navrhni akci uživateli slovně; spustí ji samostatnou zprávou."
+            )
         assert tool.prepare is not None
         prepared = await tool.prepare(ctx, args)
         payload: dict[str, Any] = {

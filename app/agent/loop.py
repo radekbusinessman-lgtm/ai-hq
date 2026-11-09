@@ -94,7 +94,11 @@ async def run_agent(
                     "tool": call.name,
                     "input": call.input,
                     "is_error": outcome.is_error,
-                    "result_preview": outcome.content[:500],
+                    "result_preview": (
+                        "[obsah se neukládá]"
+                        if (t := registry.get(call.name)) is not None and t.sensitive_output
+                        else outcome.content[:500]
+                    ),
                     "ms": int((time.monotonic() - started) * 1000),
                 }
             )

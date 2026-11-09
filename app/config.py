@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     briefing_time: str = "07:30"  # denní briefing (HH:MM, místní čas); prázdné = vypnuto
     key_expiry_warning_days: int = 14
     backups_dir: Path = Path("./backups")
+
+    # iCloud Mail (jen čtení přes IMAP). Heslo = „heslo pro aplikaci“ z Apple ID.
+    icloud_email: str | None = None
+    icloud_app_password: SecretStr | None = None
+    icloud_extra_addresses: str = ""  # další vlastní adresy oddělené čárkou (aliasy)
     backup_max_age_hours: int = 26
 
 
