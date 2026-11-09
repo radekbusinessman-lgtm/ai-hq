@@ -34,7 +34,7 @@ from app.tools.registry import ApprovalRequest
 log = logging.getLogger(__name__)
 
 DISCORD_LIMIT = 2000
-APP_VERSION = "0.8.1"
+APP_VERSION = "0.9.0"
 APPROVAL_PREFIX = "aihq:approval:"  # custom_id tlačítek: aihq:approval:<approve|reject>:<uuid>
 
 DECISION_LABEL = {

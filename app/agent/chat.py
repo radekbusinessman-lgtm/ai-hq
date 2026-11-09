@@ -32,7 +32,7 @@ from app.tools.tasks import TASK_TOOLS
 log = logging.getLogger(__name__)
 
 
-def default_tools(settings: Settings) -> list[Tool]:
+def default_tools(settings: Settings, llm: LLMClient | None = None) -> list[Tool]:
     """Nástroje agenta. Pošta jen tehdy, je-li nastavená (iCloud e-mail + heslo pro aplikaci)."""
     tools = MEMORY_TOOLS + TASK_TOOLS + PROJECT_TOOLS
     if settings.icloud_email and settings.icloud_app_password:
@@ -45,7 +45,13 @@ def default_tools(settings: Settings) -> list[Tool]:
         owners = [settings.icloud_email] + [
             a.strip() for a in settings.icloud_extra_addresses.split(",") if a.strip()
         ]
-        tools = tools + make_mail_tools(backend, owner_emails=owners, timezone=settings.timezone)
+        tools = tools + make_mail_tools(
+            backend,
+            owner_emails=owners,
+            timezone=settings.timezone,
+            triage_llm=llm,
+            triage_model=settings.llm_model_triage,
+        )
     return tools
 
 
@@ -98,7 +104,7 @@ class ChatService:
         self.sessions = sessions
         self.llm = llm
         self.settings = settings
-        self.registry = registry or ToolRegistry(default_tools(settings))
+        self.registry = registry or ToolRegistry(default_tools(settings, llm))
         self.notify = notify  # hlášení do #systemove-udalosti (chyby, rozpočet)
         self._running: dict[uuid.UUID, asyncio.Task[Any]] = {}  # běžící běhy agenta
         self._cancelled: set[uuid.UUID] = set()

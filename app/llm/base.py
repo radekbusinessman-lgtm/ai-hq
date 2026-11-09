@@ -48,9 +48,11 @@ class ToolSpec:
 class LLMResult:
     blocks: list[Block]
     model: str
-    input_tokens: int
+    input_tokens: int  # celkový vstup včetně části z mezipaměti
     output_tokens: int
     stop_reason: str | None = None
+    cache_write_tokens: int = 0  # vstup zapsaný do mezipaměti (1,25× cena vstupu)
+    cache_read_tokens: int = 0  # vstup přečtený z mezipaměti (0,1× cena vstupu)
 
     @property
     def raw_text(self) -> str:
@@ -89,17 +91,44 @@ class Usage:
     cost_usd: Decimal = field(default_factory=lambda: Decimal(0))
 
 
+CACHE_WRITE_FACTOR = Decimal("1.25")
+CACHE_READ_FACTOR = Decimal("0.1")
+
+
 def estimate_cost(
-    prices: dict[str, tuple[Decimal, Decimal]], model: str, input_tokens: int, output_tokens: int
+    prices: dict[str, tuple[Decimal, Decimal]],
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_write_tokens: int = 0,
+    cache_read_tokens: int = 0,
 ) -> Decimal:
-    """Cena volání v USD. Neznámý model se počítá nejdražší známou sazbou (bezpečná strana)."""
+    """Cena volání v USD. Neznámý model se počítá nejdražší známou sazbou (bezpečná strana).
+    input_tokens = celý vstup; z něj cache_write/cache_read se účtují upravenou sazbou."""
     if model in prices:
         p_in, p_out = prices[model]
     else:
         p_in = max((p[0] for p in prices.values()), default=Decimal("15"))
         p_out = max((p[1] for p in prices.values()), default=Decimal("75"))
     million = Decimal(1_000_000)
-    return (Decimal(input_tokens) * p_in + Decimal(output_tokens) * p_out) / million
+    uncached = max(input_tokens - cache_write_tokens - cache_read_tokens, 0)
+    cost_in = (
+        Decimal(uncached)
+        + Decimal(cache_write_tokens) * CACHE_WRITE_FACTOR
+        + Decimal(cache_read_tokens) * CACHE_READ_FACTOR
+    ) * p_in
+    return (cost_in + Decimal(output_tokens) * p_out) / million
+
+
+def result_cost(prices: dict[str, tuple[Decimal, Decimal]], r: "LLMResult") -> Decimal:
+    return estimate_cost(
+        prices,
+        r.model,
+        r.input_tokens,
+        r.output_tokens,
+        r.cache_write_tokens,
+        r.cache_read_tokens,
+    )
 
 
 def normalize_history(messages: list[LLMMessage]) -> list[LLMMessage]:

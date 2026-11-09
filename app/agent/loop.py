@@ -16,7 +16,7 @@ from app.llm.base import (
     TextBlock,
     ToolResultBlock,
     Usage,
-    estimate_cost,
+    result_cost,
 )
 from app.tools.registry import ApprovalRequest, ToolContext, ToolRegistry
 
@@ -67,9 +67,7 @@ async def run_agent(
         used_model = result.model
         usage.input_tokens += result.input_tokens
         usage.output_tokens += result.output_tokens
-        usage.cost_usd += estimate_cost(
-            settings.llm_prices_per_mtok, result.model, result.input_tokens, result.output_tokens
-        )
+        usage.cost_usd += result_cost(settings.llm_prices_per_mtok, result)
 
         if not result.tool_uses:
             text = result.raw_text
@@ -92,12 +90,7 @@ async def run_agent(
                 )
                 usage.input_tokens += result.input_tokens
                 usage.output_tokens += result.output_tokens
-                usage.cost_usd += estimate_cost(
-                    settings.llm_prices_per_mtok,
-                    result.model,
-                    result.input_tokens,
-                    result.output_tokens,
-                )
+                usage.cost_usd += result_cost(settings.llm_prices_per_mtok, result)
                 text = (text + result.raw_text) if text else result.raw_text
                 if messages[-1].content == CONTINUE_PROMPT:
                     messages = messages[:-2]
@@ -141,6 +134,12 @@ async def run_agent(
                     "ms": int((time.monotonic() - started) * 1000),
                 }
             )
+            # náklady modelů volaných uvnitř nástroje (např. předtřídění pošty Haiku)
+            while ctx.extra_usage:
+                sub = ctx.extra_usage.pop()
+                usage.input_tokens += sub.input_tokens
+                usage.output_tokens += sub.output_tokens
+                usage.cost_usd += result_cost(settings.llm_prices_per_mtok, sub)
             if outcome.approval is not None:
                 approvals.append(outcome.approval)
             results.append(ToolResultBlock(call.id, outcome.content, outcome.is_error))

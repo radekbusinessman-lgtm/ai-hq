@@ -40,6 +40,8 @@ class ToolContext:
     # Zdroje nedůvěryhodného obsahu, které běh už přečetl (např. „email“). Jakmile je
     # neprázdné, běh nesmí navrhovat akce ke schválení (ochrana proti prompt injection).
     tainted_by: set[str] = field(default_factory=set)
+    # Volání modelu uvnitř nástroje (LLMResult) – smyčka je započte do nákladů běhu.
+    extra_usage: list[Any] = field(default_factory=list)
 
 
 class ToolInputError(Exception):

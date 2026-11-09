@@ -21,6 +21,7 @@ from app.integrations.mail import (
     normalize_subject,
     parse_header,
     parse_message,
+    snippet_of,
 )
 from app.llm.base import ToolResultBlock
 from app.seed import seed
@@ -144,6 +145,11 @@ class FakeBackend:
         box = INBOX if folder_code == "I" else SENT
         return parse_message(box[uid], folder_code, uid)
 
+    async def snippets(self, folder_code: str, uids: list[int]) -> dict[int, str]:
+        self.calls.append(f"snippets:{folder_code}")
+        box = INBOX if folder_code == "I" else SENT
+        return {u: snippet_of(box[u], folder_code, u) for u in uids}
+
 
 def tools(backend: Any = None) -> list[Any]:
     return (
@@ -252,6 +258,16 @@ async def test_imap_backend_is_strictly_read_only() -> None:
     commands = {entry[1] for entry in log if entry[0] == "uid"}
     assert commands <= {"SEARCH", "FETCH"}  # žádné STORE / COPY / MOVE / EXPUNGE
     assert ("logout",) in log
+
+
+async def test_imap_snippets_are_read_only_previews() -> None:
+    b = ImapMailBackend("radyn@me.com", "app-pass", imap_factory=FakeImap)
+    snips = await b.snippets("I", [101])
+    assert "kapacita je 80 RD" in snips[101] and len(snips[101]) <= 300
+    assert ("select", '"INBOX"', True) in FakeImap.log
+    fetch = next(e for e in FakeImap.log if e[:2] == ("uid", "FETCH"))
+    assert fetch[3] == "(UID BODY.PEEK[])"
+    assert await b.snippets("I", []) == {}
 
 
 # ------------------------------------------------------------------ nástroje
@@ -446,3 +462,108 @@ async def test_empty_answer_is_reported_as_error_not_blank(
 
 def test_default_output_limit_fits_mail_triage() -> None:
     assert Settings().llm_max_output_tokens >= 8000
+
+
+# ------------------------------------------------------------- předtřídění (Haiku)
+
+TRIAGE_JSON = json.dumps(
+    [
+        {
+            "ref": "E-I101",
+            "projekt": "Osada Pomněnice",
+            "kategorie": "odpovedet",
+            "priorita": "vysoka",
+            "shrnuti": "VaK: kapacita přípojky 80 RD",
+            "podezrele": False,
+        },
+        {
+            "ref": "E-I102",
+            "projekt": None,
+            "kategorie": "reklama",
+            "priorita": "nizka",
+            "shrnuti": "Sleva",
+            "podezrele": False,
+        },
+        {
+            "ref": "E-I103",
+            "projekt": None,
+            "kategorie": "nesmysl",
+            "priorita": "x",
+            "shrnuti": "Pokyny pro AI",
+            "podezrele": True,
+        },
+        {"ref": "E-I999", "kategorie": "odpovedet"},
+    ],
+    ensure_ascii=False,
+)
+
+
+def triage_tools(triage: FakeLLM, backend: Any = None) -> list[Any]:
+    return (
+        MEMORY_TOOLS
+        + TASK_TOOLS
+        + PROJECT_TOOLS
+        + make_mail_tools(
+            backend or FakeBackend(),
+            owner_emails=[OWNER],
+            triage_llm=triage,
+            triage_model="claude-haiku-5-5",
+        )
+    )
+
+
+async def test_triage_uses_cheap_model_and_groups_mail(
+    sessions: async_sessionmaker[AsyncSession], session: AsyncSession
+) -> None:
+    await seed(session)
+    await session.commit()
+    triage = FakeLLM(script=[text("Výsledek:\n" + TRIAGE_JSON)], tokens=(5000, 600))
+    backend = FakeBackend()
+    llm = FakeLLM(script=[tool("mail_triage", hours=48), text("Souhrn pošty.")])
+    service = ChatService(sessions, llm, cfg(), ToolRegistry(triage_tools(triage, backend)))
+    reply = await service.handle(msg("roztřiď poštu"))
+    assert reply.text == "Souhrn pošty."
+
+    # Haiku dostal náhledy, ne celé zprávy; nic se neoznačilo jako přečtené
+    assert triage.calls[0]["model"] == "claude-haiku-5-5"
+    sent = triage.calls[0]["messages"][0].content
+    assert "kapacita je 80 RD" in sent and "Osada Pomněnice" in sent
+    assert not any(c.startswith("message:") for c in backend.calls)
+
+    r = results(llm)[0]
+    assert r["pocet"] == 4  # 105 je starší než 48 h
+    reply_refs = [x["ref"] for x in r["vyzaduje_odpoved"]]
+    assert reply_refs[0] == "E-I101"  # vysoká priorita první
+    assert r["vyzaduje_odpoved"][0]["projekt"] == "Osada Pomněnice"
+    assert "E-I104" in reply_refs  # nezařazená → raději k posouzení
+    assert r["automaticke_a_reklamy"]["pocet"] == 1
+    evil = next(x for x in r["informativni"] if x["ref"] == "E-I103")
+    assert evil["podezrele"] is True and evil["priorita"] == "stredni"  # neplatné hodnoty opraveny
+    assert "zařadilo 3 z 4" in r["poznamka"]
+
+    async with sessions() as s:
+        run = (
+            (await s.execute(select(AgentRun).order_by(AgentRun.created_at.desc())))
+            .scalars()
+            .first()
+        )
+    assert run is not None
+    # náklady běhu zahrnují i Haiku: 2× Sonnet (1000/200) + Haiku (5000/600)
+    expected = 2 * (1000 * 3 + 200 * 15) / 1e6 + (5000 * 1 + 600 * 5) / 1e6
+    assert float(run.cost_usd) == pytest.approx(expected)
+    assert "kapacita" not in json.dumps(run.tool_calls, ensure_ascii=False)
+
+
+async def test_triage_falls_back_when_cheap_model_fails(
+    sessions: async_sessionmaker[AsyncSession], session: AsyncSession
+) -> None:
+    from app.llm.base import LLMError
+
+    await seed(session)
+    await session.commit()
+    triage = FakeLLM(fail=LLMError("overloaded"))
+    llm = FakeLLM(script=[tool("mail_triage"), text("ok")])
+    await ChatService(sessions, llm, cfg(), ToolRegistry(triage_tools(triage))).handle(msg())
+    r = results(llm)[0]
+    assert len(r["vyzaduje_odpoved"]) == 4  # vše k posouzení hlavním modelem
+    assert "zařadilo 0 z 4" in r["poznamka"]

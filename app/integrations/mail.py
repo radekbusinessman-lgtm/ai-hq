@@ -18,8 +18,9 @@ from email.utils import getaddresses, parsedate_to_datetime
 from html.parser import HTMLParser
 from typing import Any, Protocol
 
-BODY_LIMIT = 6000  # znaků těla zprávy předaných modelu
-SNIPPET_LIMIT = 280
+BODY_LIMIT = 4000  # znaků těla zprávy předaných modelu
+SNIPPET_LIMIT = 300  # náhled pro předtřídění
+SNIPPET_MAX_SIZE = 400_000  # větší zprávy (velké přílohy) se pro náhled nestahují
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 HEADER_FIELDS = "FROM TO CC SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES"
 FOLDER_CODES = {"I": "INBOX", "S": "Sent Messages"}  # iCloud název odeslané pošty
@@ -214,6 +215,14 @@ class MailBackend(Protocol):
     async def message(self, folder_code: str, uid: int) -> MailMessage: ...
 
 
+def snippet_of(raw: bytes, folder_code: str, uid: int) -> str:
+    try:
+        body = parse_message(raw, folder_code, uid).body
+    except Exception:  # noqa: BLE001 – poškozená zpráva nesmí shodit třídění
+        return ""
+    return re.sub(r"\s+", " ", body)[:SNIPPET_LIMIT]
+
+
 class ImapMailBackend:
     """Skutečný iCloud IMAP. Každé volání = krátké spojení (žádná trvale otevřená session)."""
 
@@ -297,12 +306,37 @@ class ImapMailBackend:
         finally:
             self._close(conn)
 
+    def _snippets_sync(self, folder_code: str, uids: list[int]) -> dict[int, str]:
+        if not uids:
+            return {}
+        conn = self._connect(FOLDER_CODES[folder_code])
+        try:
+            out: dict[int, str] = {}
+            for i in range(0, len(uids), 20):
+                uid_set = ",".join(str(u) for u in uids[i : i + 20])
+                typ, data = conn.uid("FETCH", uid_set, "(UID BODY.PEEK[])")
+                if typ != "OK":
+                    raise MailError("Načtení náhledů selhalo.")
+                for meta, raw in _fetch_items(data):
+                    uid = _meta_int(meta, "UID")
+                    if uid is not None:
+                        out[uid] = snippet_of(raw, folder_code, uid)
+            return out
+        finally:
+            self._close(conn)
+
     async def headers_since(
         self, folder_code: str, since: datetime, limit: int
     ) -> list[MailHeader]:
         import asyncio
 
         return await asyncio.to_thread(self._headers_sync, folder_code, since, limit)
+
+    async def snippets(self, folder_code: str, uids: list[int]) -> dict[int, str]:
+        """Krátké náhledy textu (BODY.PEEK – zprávy zůstanou nepřečtené)."""
+        import asyncio
+
+        return await asyncio.to_thread(self._snippets_sync, folder_code, uids)
 
     async def message(self, folder_code: str, uid: int) -> MailMessage:
         import asyncio

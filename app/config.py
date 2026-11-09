@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr | None = None
     llm_model_default: str = "claude-sonnet-5-5"
     llm_model_briefing: str = "claude-opus-5-5"
+    llm_model_triage: str = "claude-haiku-5-5"  # levné předtřídění pošty
     voyage_api_key: SecretStr | None = None
     anthropic_key_expires_on: date | None = None  # pro upozornění v briefingu
     llm_max_output_tokens: int = 8000

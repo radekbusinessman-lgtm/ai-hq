@@ -94,8 +94,12 @@ async def test_anthropic_adapter_parses_text_and_usage() -> None:
     )
     assert (r.text, r.input_tokens, r.output_tokens) == ("Ahoj", 12, 3)
     assert [(t.name, t.input) for t in r.tool_uses] == [("search_facts", {"query": "voda"})]
-    assert msgs.kwargs["system"] == "S" and msgs.kwargs["max_tokens"] == 50
-    assert msgs.kwargs["messages"] == [{"role": "user", "content": "Hi"}]
+    eph = {"type": "ephemeral"}
+    assert msgs.kwargs["system"] == [{"type": "text", "text": "S", "cache_control": eph}]
+    assert msgs.kwargs["max_tokens"] == 50
+    assert msgs.kwargs["messages"] == [
+        {"role": "user", "content": [{"type": "text", "text": "Hi", "cache_control": eph}]}
+    ]
 
 
 async def test_anthropic_api_error_becomes_llm_error() -> None:
@@ -128,3 +132,31 @@ async def test_anthropic_adapter_serializes_tools_and_blocks() -> None:
     assert sent[1]["content"][1] == {"type": "tool_use", "id": "a", "name": "x", "input": {"q": 1}}
     assert sent[2]["content"][0]["type"] == "tool_result"
     assert msgs.kwargs["tools"][0]["name"] == "x"
+    # mezipaměť: poslední nástroj a poslední blok poslední zprávy (max. 4 značky celkem)
+    assert msgs.kwargs["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert sent[2]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in sent[1]["content"][-1]
+
+
+async def test_cache_usage_is_reported_and_priced() -> None:
+    from decimal import Decimal
+
+    from app.llm.base import estimate_cost, result_cost
+
+    usage = SimpleNamespace(
+        input_tokens=1_000,
+        output_tokens=100,
+        cache_creation_input_tokens=10_000,
+        cache_read_input_tokens=100_000,
+    )
+    resp = SimpleNamespace(model="claude-sonnet-5-5", content=[], usage=usage)
+    client = AnthropicClient("test", sdk=SimpleNamespace(messages=FakeMessages(resp)))
+    r = await client.complete(
+        system="S", messages=[LLMMessage("user", "Hi")], model="m", max_tokens=5
+    )
+    assert (r.input_tokens, r.cache_write_tokens, r.cache_read_tokens) == (111_000, 10_000, 100_000)
+    prices = Settings().llm_prices_per_mtok
+    # 1k×3 + 10k×3×1,25 + 100k×3×0,1 + 100×15 = 3000+37500+30000+1500 = 72000 / 1e6
+    assert result_cost(prices, r) == Decimal("0.072")
+    # bez mezipaměti by stejný vstup stál 111k×3 + 1,5k = 0.3345 USD
+    assert estimate_cost(prices, r.model, 111_000, 100) == Decimal("0.3345")
