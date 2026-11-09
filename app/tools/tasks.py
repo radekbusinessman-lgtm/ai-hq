@@ -2,12 +2,13 @@
 
 from datetime import UTC, date, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import or_, select
 
 from app.audit import audit
 from app.db.enums import PermissionLevel, TaskStatus
-from app.db.models import Project, Task
+from app.db.models import AuditLog, Project, Task
 from app.tools.memory import PROJECT_PARAM, resolve_project
 from app.tools.registry import Tool, ToolContext, ToolInputError
 
@@ -59,11 +60,14 @@ def _task_dict(t: Task, project_name: str | None) -> dict[str, Any]:
     }
 
 
-async def _find_task(s: Any, ref: str) -> Task:
+async def _find_task(s: Any, ref: str, company_id: Any = None) -> Task:
     prefix = ref.strip().upper().removeprefix("T-").lower()
     if len(prefix) < 6 or not all(c in "0123456789abcdef" for c in prefix):
         raise ToolInputError(f"Neplatná reference úkolu '{ref}' (očekávám např. T-1a2b3c4d).")
-    rows = (await s.scalars(select(Task))).all()
+    stmt = select(Task)
+    if company_id is not None:
+        stmt = stmt.where(Task.company_id == company_id)
+    rows = (await s.scalars(stmt)).all()
     matches = [t for t in rows if str(t.id).replace("-", "").startswith(prefix)]
     if not matches:
         raise ToolInputError(f"Úkol {ref} neexistuje.")
@@ -102,6 +106,13 @@ async def create_task(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
             entity_type="task",
             entity_id=task.id,
             company_id=project.company_id,
+            requested_by=ctx.actor,
+            values={
+                "nazev": task.title,
+                "termin": due.isoformat() if due else None,
+                "priorita": PRIORITY_LABEL[priority],
+                "stav": TaskStatus.OPEN.value,
+            },
         )
         await s.refresh(task)
         return {"vytvoreno": True, **_task_dict(task, project.name)}
@@ -112,6 +123,8 @@ async def list_tasks(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     async with ctx.sessions() as s:
         stmt = select(Task, Project.name).join(Project, Project.id == Task.project_id, isouter=True)
         project_name = None
+        if ctx.company_id is not None:  # kanál projektu: jen úkoly téže firmy
+            stmt = stmt.where(Task.company_id == ctx.company_id)
         if args.get("project") or (ctx.project_id and not args.get("all_projects")):
             project = await resolve_project(s, ctx, args.get("project"))
             stmt = stmt.where(Task.project_id == project.id)
@@ -139,24 +152,27 @@ async def list_tasks(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 async def update_task(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     ref = str(args.get("ref") or "")
     async with ctx.sessions() as s, s.begin():
-        task = await _find_task(s, ref)
+        task = await _find_task(s, ref, ctx.company_id)
         changes: dict[str, Any] = {}
         if args.get("status"):
             new = str(args["status"])
             if new not in {x.value for x in TaskStatus}:
                 raise ToolInputError("Stav: open, in_progress, done nebo cancelled.")
+            changes["stav"] = [task.status.value, new]
             task.status = TaskStatus(new)
             task.completed_at = datetime.now(UTC) if new == TaskStatus.DONE.value else None
-            changes["stav"] = new
         if "due_date" in args:
+            old_due = task.due_date.isoformat() if task.due_date else None
             task.due_date = _parse_date(args.get("due_date"))
-            changes["termin"] = task.due_date.isoformat() if task.due_date else None
+            changes["termin"] = [old_due, task.due_date.isoformat() if task.due_date else None]
         if args.get("priority") not in (None, ""):
+            old_p = PRIORITY_LABEL.get(task.priority, str(task.priority))
             task.priority = _parse_priority(args.get("priority"))
-            changes["priorita"] = task.priority
+            changes["priorita"] = [old_p, PRIORITY_LABEL[task.priority]]
         if args.get("title"):
+            old_title = task.title
             task.title = str(args["title"]).strip()[:300]
-            changes["nazev"] = task.title
+            changes["nazev"] = [old_title, task.title]
         if not changes:
             raise ToolInputError("Není co změnit (status, due_date, priority, title).")
         audit(
@@ -166,6 +182,7 @@ async def update_task(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
             entity_type="task",
             entity_id=task.id,
             company_id=task.company_id,
+            requested_by=ctx.actor,
             changes=changes,
         )
         project = await s.get(Project, task.project_id) if task.project_id else None
@@ -174,9 +191,51 @@ async def update_task(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         return {"zmeneno": changes, **_task_dict(task, project.name if project else None)}
 
 
+async def task_history(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    """Historie úkolu z auditního logu (který nejde zpětně měnit)."""
+    async with ctx.sessions() as s:
+        task = await _find_task(s, str(args.get("ref") or ""), ctx.company_id)
+        rows = (
+            await s.scalars(
+                select(AuditLog)
+                .where(AuditLog.entity_type == "task", AuditLog.entity_id == str(task.id))
+                .order_by(AuditLog.id)
+            )
+        ).all()
+    tz = ZoneInfo("Europe/Prague")
+    return {
+        "ref": task_ref(task.id),
+        "nazev": task.title,
+        "historie": [
+            {
+                "kdy": r.occurred_at.astimezone(tz).strftime("%Y-%m-%d %H:%M"),
+                "akce": {"task.created": "založen", "task.updated": "změněn"}.get(
+                    r.action, r.action
+                ),
+                "kdo": r.details.get("requested_by", r.actor),
+                "hodnoty": r.details.get("values"),
+                "zmeny": r.details.get("changes"),
+            }
+            for r in rows
+        ],
+    }
+
+
 # ---------------------------------------------------------------- definice
 
 TASK_TOOLS = [
+    Tool(
+        name="task_history",
+        description="Zobrazí historii úkolu: kdy a kým byl založen a jak se měnil stav, "
+        "termín, priorita či název (změny jako [původní, nová]).",
+        input_schema={
+            "type": "object",
+            "properties": {"ref": {"type": "string", "description": "Např. T-1a2b3c4d."}},
+            "required": ["ref"],
+        },
+        level=PermissionLevel.AUTO,
+        handler=task_history,
+    ),
     Tool(
         name="create_task",
         description=(

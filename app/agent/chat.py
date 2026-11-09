@@ -10,6 +10,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -38,6 +39,7 @@ MSG_BUDGET = (
     "Zprávu jsem uložil, ale nezpracoval."
 )
 MSG_ERROR = "⚠️ Při zpracování nastala chyba (zaznamenáno, běh {run_id}). Zkuste to prosím znovu."
+MSG_CANCELLED = "⏹️ Zpracování bylo zastaveno příkazem /stop (běh {run_id})."
 MSG_TIMEOUT = "⏱️ Odpověď trvala déle než {seconds} s a byla přerušena (běh {run_id})."
 
 
@@ -76,6 +78,23 @@ class ChatService:
         self.settings = settings
         self.registry = registry or ToolRegistry(MEMORY_TOOLS + TASK_TOOLS + PROJECT_TOOLS)
         self.notify = notify  # hlášení do #systemove-udalosti (chyby, rozpočet)
+        self._running: dict[uuid.UUID, asyncio.Task[Any]] = {}  # běžící běhy agenta
+        self._cancelled: set[uuid.UUID] = set()
+
+    @property
+    def running_count(self) -> int:
+        return len(self._running)
+
+    async def cancel_running(self) -> int:
+        """Okamžitě přeruší všechny běžící běhy agenta (používá /stop). Vrací jejich počet.
+        Běhy se zaznamenají jako zrušené; rozpracované databázové transakce se vrátí zpět."""
+        tasks = list(self._running.items())
+        for run_id, task in tasks:
+            self._cancelled.add(run_id)
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*(t for _, t in tasks), return_exceptions=True)
+        return len(tasks)
 
     async def _notify(self, text: str) -> None:
         if self.notify is None:
@@ -166,8 +185,8 @@ class ChatService:
 
         # --- 2. agent: model + nástroje (mimo transakci) -----------------------------
         system = build_system_prompt(datetime.now(UTC).date(), project)
-        try:
-            result = await asyncio.wait_for(
+        agent_task = asyncio.ensure_future(
+            asyncio.wait_for(
                 run_agent(
                     llm=self.llm,
                     registry=self.registry,
@@ -179,6 +198,15 @@ class ChatService:
                 ),
                 timeout=self.settings.max_run_seconds,
             )
+        )
+        self._running[run_id] = agent_task
+        try:
+            result = await agent_task
+        except asyncio.CancelledError:
+            if run_id not in self._cancelled:
+                raise  # zrušení zvenčí (vypnutí aplikace) – nepohlcovat
+            await self._finish_failed(run_id, RunStatus.CANCELLED, "zastaveno příkazem /stop")
+            return ChatReply(MSG_CANCELLED.format(run_id=run_id), run_id, processed=True)
         except TimeoutError:
             await self._finish_failed(run_id, RunStatus.LIMIT_EXCEEDED, "timeout")
             await self._notify(f"⏱️ Běh `{run_id}` překročil časový limit.")
@@ -191,6 +219,9 @@ class ChatService:
             await self._finish_failed(run_id, RunStatus.ERROR, f"{type(e).__name__}: {e}")
             await self._notify(f"⚠️ Běh `{run_id}` skončil chybou: `{type(e).__name__}`")
             return ChatReply(MSG_ERROR.format(run_id=run_id), run_id, processed=True)
+        finally:
+            self._running.pop(run_id, None)
+            self._cancelled.discard(run_id)
 
         # --- 3. transakce: uložit odpověď a výsledek běhu ---------------------------
         status = RunStatus.LIMIT_EXCEEDED if result.limit_hit else RunStatus.SUCCESS

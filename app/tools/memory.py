@@ -38,7 +38,14 @@ def search_terms(query: str) -> list[str]:
     return [w[:5] if len(w) > 5 else w for w in words if len(w) >= 3 or w.isdigit()]
 
 
+OTHER_COMPANY = (
+    "Projekt {name} patří jiné firmě než projekt tohoto kanálu. Data firem se v projektových "
+    "kanálech nemíchají – zeptej se v kanálu #chief-of-staff."
+)
+
+
 async def resolve_project(s: AsyncSession, ctx: ToolContext, name: str | None) -> Project:
+    """Najde projekt. V kanálu projektu (ctx.company_id) jen v rámci téže firmy."""
     if not name:
         if ctx.project_id is None:
             raise ToolInputError("Konverzace není přiřazena k projektu – uveď název projektu.")
@@ -47,6 +54,8 @@ async def resolve_project(s: AsyncSession, ctx: ToolContext, name: str | None) -
     for p in (await s.scalars(select(Project))).all():
         names = [p.slug, p.name, *p.aliases]
         if any(_strip_accents(n.lower()) == needle for n in names):
+            if ctx.company_id is not None and p.company_id != ctx.company_id:
+                raise ToolInputError(OTHER_COMPANY.format(name=p.name))
             return p
     raise ToolInputError(f"Projekt '{name}' neznám. Použij list_projects.")
 
@@ -60,11 +69,14 @@ STATUS_CZ = {
 }
 
 
-async def find_fact(s: AsyncSession, ref: str) -> Fact:
+async def find_fact(s: AsyncSession, ref: str, company_id: uuid.UUID | None = None) -> Fact:
     prefix = ref.strip().upper().removeprefix("F-").lower()
     if len(prefix) < 6 or not all(c in "0123456789abcdef" for c in prefix):
         raise ToolInputError(f"Neplatná reference faktu '{ref}' (očekávám např. F-1a2b3c4d).")
-    facts = (await s.scalars(select(Fact))).all()
+    stmt = select(Fact)
+    if company_id is not None:
+        stmt = stmt.where(Fact.company_id == company_id)
+    facts = (await s.scalars(stmt)).all()
     matches = [f for f in facts if str(f.id).replace("-", "").startswith(prefix)]
     if not matches:
         raise ToolInputError(f"Fakt {ref} neexistuje.")
@@ -95,10 +107,18 @@ async def list_projects(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any
             await s.execute(
                 select(Project, Company.name)
                 .join(Company, Company.id == Project.company_id)
+                .where(
+                    Project.company_id == ctx.company_id
+                    if ctx.company_id is not None
+                    else Project.id.is_not(None)
+                )
                 .order_by(Project.name)
             )
         ).all()
     return {
+        "rozsah": "jen projekty firmy tohoto kanálu"
+        if ctx.company_id is not None
+        else "všechny firmy",
         "projekty": [
             {
                 "nazev": p.name,
@@ -108,7 +128,7 @@ async def list_projects(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any
                 "aliasy": p.aliases,
             }
             for p, company in rows
-        ]
+        ],
     }
 
 
@@ -195,7 +215,7 @@ async def prepare_supersede_fact(ctx: ToolContext, args: dict[str, Any]) -> Prep
     if not reason:
         raise ToolInputError("Uveď důvod změny (reason).")
     async with ctx.sessions() as s:
-        old = await find_fact(s, str(args.get("ref") or ""))
+        old = await find_fact(s, str(args.get("ref") or ""), ctx.company_id)
         if old.status == FactStatus.OUTDATED or old.superseded_by_id is not None:
             raise ToolInputError("Tento fakt už je neaktuální / nahrazený.")
         project = await s.get(Project, old.project_id) if old.project_id else None

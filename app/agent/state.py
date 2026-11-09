@@ -49,6 +49,39 @@ async def spent_this_month(s: AsyncSession) -> Decimal:
     return Decimal(total or 0)
 
 
+async def cost_summary(s: AsyncSession, tz: str = "Europe/Prague") -> dict[str, Any]:
+    """Útrata a tokeny: dnes (místní čas) a tento měsíc, po modelech."""
+    from zoneinfo import ZoneInfo
+
+    local_now = datetime.now(ZoneInfo(tz))
+    day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
+    today = await s.scalar(
+        select(func.coalesce(func.sum(AgentRun.cost_usd), 0)).where(
+            AgentRun.started_at >= day_start
+        )
+    )
+    rows = (
+        await s.execute(
+            select(
+                AgentRun.model,
+                func.count(),
+                func.coalesce(func.sum(AgentRun.input_tokens), 0),
+                func.coalesce(func.sum(AgentRun.output_tokens), 0),
+                func.coalesce(func.sum(AgentRun.cost_usd), 0),
+            )
+            .where(AgentRun.started_at >= month_start())
+            .group_by(AgentRun.model)
+        )
+    ).all()
+    by_model: dict[str, dict[str, Any]] = {}
+    month_total = Decimal(0)
+    for model, n, i, o, c in rows:
+        usd = Decimal(c)
+        month_total += usd
+        by_model[str(model or "?")] = {"runs": n, "in": int(i), "out": int(o), "usd": usd}
+    return {"today_usd": Decimal(today or 0), "month_usd": month_total, "by_model": by_model}
+
+
 async def run_stats_24h(s: AsyncSession) -> dict[str, int]:
     since = datetime.now(UTC) - timedelta(hours=24)
     rows = (

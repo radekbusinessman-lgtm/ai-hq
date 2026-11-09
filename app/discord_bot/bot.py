@@ -21,6 +21,7 @@ from app.agent.briefing import briefing_message
 from app.agent.chat import ChatService, InboundMessage
 from app.agent.state import (
     agents_enabled,
+    cost_summary,
     run_stats_24h,
     set_agents_enabled,
     spent_this_month,
@@ -33,7 +34,7 @@ from app.tools.registry import ApprovalRequest
 log = logging.getLogger(__name__)
 
 DISCORD_LIMIT = 2000
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.7.0"
 APPROVAL_PREFIX = "aihq:approval:"  # custom_id tlačítek: aihq:approval:<approve|reject>:<uuid>
 
 DECISION_LABEL = {
@@ -359,10 +360,16 @@ class AIHQBot(discord.Client):
                 return await deny(interaction)
             async with bot.chat.sessions() as s, s.begin():
                 await set_agents_enabled(s, False, f"user:discord:{interaction.user.id}")
-            await interaction.response.send_message(
-                "⏸️ Agenti zastaveni. Zprávy se ukládají, ale AI je nezpracuje. Zapnutí: /start"
+            # vypínač je uložen dřív, než se ruší běžící úlohy → nic nového už nenaběhne
+            await interaction.response.defer()
+            cancelled = await bot.chat.cancel_running()
+            text = (
+                "⏸️ **Agenti zastaveni.** Nové úlohy (zprávy i plánované) se nespustí"
+                f"{f'; přerušeno běžících úloh: {cancelled}' if cancelled else ''}. "
+                "Zprávy se dál ukládají. Zapnutí: /start"
             )
-            await bot.post_event("⏸️ Agenti zastaveni příkazem /stop.")
+            await interaction.followup.send(text)
+            await bot.post_event(f"⏸️ Agenti zastaveni příkazem /stop (přerušeno: {cancelled}).")
 
         @self.tree.command(name="start", description="Znovu zapne agenty")
         async def start(interaction: discord.Interaction) -> None:
@@ -381,6 +388,7 @@ class AIHQBot(discord.Client):
                 enabled = await agents_enabled(s)
                 spent = await spent_this_month(s)
                 stats = await run_stats_24h(s)
+                costs = await cost_summary(s, bot.settings.timezone)
             uptime_h = (time.monotonic() - bot.started_at) / 3600
             budget = bot.settings.monthly_budget_usd
             runs = ", ".join(f"{k}: {v}" for k, v in sorted(stats.items())) or "žádné"
@@ -389,7 +397,14 @@ class AIHQBot(discord.Client):
             text = (
                 f"**AI HQ {APP_VERSION}**\n"
                 f"Agenti: {'▶️ běží' if enabled else '⏸️ zastaveni'}\n"
-                f"Útrata tento měsíc: {spent:.2f} / {budget} USD\n"
+                f"Útrata dnes: {costs['today_usd']:.2f} USD · tento měsíc: "
+                f"{spent:.2f} / {budget} USD _(odhad podle ceníku v config.py)_\n"
+                + "".join(
+                    f"  · {m}: {v['runs']} běhů, {v['in']:,} / {v['out']:,} tokenů, "
+                    f"{v['usd']:.2f} USD\n".replace(",", " ")
+                    for m, v in sorted(costs["by_model"].items())
+                )
+                + f"Běží právě: {bot.chat.running_count} úloh\n"
                 f"Běhy za 24 h: {runs}\n"
                 f"Bot běží: {uptime_h:.1f} h · odezva Discordu: {bot.latency * 1000:.0f} ms\n"
                 f"Platnost API klíče do: {expiry_txt}\n"

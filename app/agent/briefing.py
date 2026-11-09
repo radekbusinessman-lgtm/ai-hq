@@ -10,12 +10,12 @@ BRIEFING_PROMPT = """\
 Připrav stručný ranní briefing pro CEO. Postup:
 1. list_projects – zjisti aktivní projekty.
 2. Pro každý projekt list_tasks (otevřené) a search_facts (prázdný dotaz = nejnovější fakta).
-Výstup česky, max. ~25 řádků, v tomto pořadí:
-- **Po termínu a do 7 dnů** – úkoly s termínem (ref, termín, priorita).
-- **Ostatní otevřené úkoly** – jen počet a 3 nejdůležitější.
-- **Nové informace v paměti** za poslední týden (s citací [F-…] a stavem).
-- **Rizika a otevřené otázky** – jen pokud plynou z dat; jinak napiš, že data chybí.
-- **Doporučené 3 kroky na dnešek.**
+Výstup česky, max. ~30 řádků, pro každý projekt v tomto pořadí:
+1. **Aktuální stav projektu** – jen z uložených faktů (citace [F-…] a stav: ověřeno/předpoklad).
+2. **Otevřené úkoly** (ref [T-…], priorita).
+3. **Blížící se termíny** – po termínu a do 7 dnů.
+4. **Rizika a nevyřešené otázky** – jen pokud plynou z dat; chybějící data výslovně uveď.
+5. **Tři doporučené priority na dnešek.**
 Nic si nedomýšlej; když data chybí, řekni to. Nic neukládej ani neměň.
 """
 
