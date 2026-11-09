@@ -57,6 +57,10 @@ MSG_BUDGET = (
     "Zprávu jsem uložil, ale nezpracoval."
 )
 MSG_ERROR = "⚠️ Při zpracování nastala chyba (zaznamenáno, běh {run_id}). Zkuste to prosím znovu."
+MSG_EMPTY = (
+    "⚠️ Model nevrátil žádný text (důvod: {reason}, běh {run_id}). Nic nebylo provedeno "
+    "ani odesláno – zkuste to prosím znovu, případně zúžit zadání."
+)
 MSG_CANCELLED = "⏹️ Zpracování bylo zastaveno příkazem /stop (běh {run_id})."
 MSG_TIMEOUT = "⏱️ Odpověď trvala déle než {seconds} s a byla přerušena (běh {run_id})."
 
@@ -240,6 +244,12 @@ class ChatService:
         finally:
             self._running.pop(run_id, None)
             self._cancelled.discard(run_id)
+
+        if not result.text.strip() and not result.limit_hit:
+            reason = result.stop_reason or "neznámý"
+            await self._finish_failed(run_id, RunStatus.ERROR, f"prázdná odpověď modelu ({reason})")
+            await self._notify(f"⚠️ Běh `{run_id}`: model nevrátil text (důvod: {reason}).")
+            return ChatReply(MSG_EMPTY.format(reason=reason, run_id=run_id), run_id, processed=True)
 
         # --- 3. transakce: uložit odpověď a výsledek běhu ---------------------------
         status = RunStatus.LIMIT_EXCEEDED if result.limit_hit else RunStatus.SUCCESS

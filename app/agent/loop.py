@@ -13,6 +13,7 @@ from app.llm.base import (
     Block,
     LLMClient,
     LLMMessage,
+    TextBlock,
     ToolResultBlock,
     Usage,
     estimate_cost,
@@ -23,6 +24,7 @@ MSG_STEP_LIMIT = (
     "⚠️ Úloha vyžadovala víc než {n} kroků a byla zastavena kvůli limitu. "
     "Zkuste ji prosím rozdělit na menší části."
 )
+CONTINUE_PROMPT = "Pokračuj přesně tam, kde jsi skončil. Nic neopakuj."
 MSG_COST_LIMIT = "⚠️ Běh překročil nákladový limit {limit} USD a byl zastaven."
 
 
@@ -34,6 +36,7 @@ class LoopResult:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     limit_hit: str | None = None  # "steps" | "cost" | None
     approvals: list[ApprovalRequest] = field(default_factory=list)
+    stop_reason: str | None = None
 
 
 async def run_agent(
@@ -69,7 +72,43 @@ async def run_agent(
         )
 
         if not result.tool_uses:
-            return LoopResult(result.text, used_model, usage, tool_log, approvals=approvals)
+            text = result.raw_text
+            # Odpověď uťatá limitem délky → model pokračuje tam, kde skončil (max N×).
+            for _ in range(settings.llm_max_continuations):
+                if result.stop_reason != "max_tokens":
+                    break
+                if text:
+                    messages.append(LLMMessage("assistant", [TextBlock(text)]))
+                    messages.append(LLMMessage("user", CONTINUE_PROMPT))
+                    max_tokens = settings.llm_max_output_tokens
+                else:  # limit spotřeboval vnitřní rozmysl – zkusit znovu s větším limitem
+                    max_tokens = settings.llm_max_output_tokens * 2
+                result = await llm.complete(
+                    system=system,
+                    messages=messages,
+                    model=model,
+                    max_tokens=max_tokens,
+                    tools=registry.specs(),
+                )
+                usage.input_tokens += result.input_tokens
+                usage.output_tokens += result.output_tokens
+                usage.cost_usd += estimate_cost(
+                    settings.llm_prices_per_mtok,
+                    result.model,
+                    result.input_tokens,
+                    result.output_tokens,
+                )
+                text = (text + result.raw_text) if text else result.raw_text
+                if messages[-1].content == CONTINUE_PROMPT:
+                    messages = messages[:-2]
+            return LoopResult(
+                text.strip(),
+                used_model,
+                usage,
+                tool_log,
+                approvals=approvals,
+                stop_reason=result.stop_reason,
+            )
 
         if usage.cost_usd >= settings.max_run_cost_usd:
             return LoopResult(

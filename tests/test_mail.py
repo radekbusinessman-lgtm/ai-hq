@@ -388,3 +388,61 @@ def test_valid_refs(ref: str) -> None:
     from app.tools.mail import _parse_ref
 
     assert _parse_ref(ref)[1] > 0
+
+
+# ------------------------------------------------- dlouhé a prázdné odpovědi
+
+
+async def test_truncated_answer_is_continued_not_lost(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    llm = FakeLLM(
+        script=[
+            tool("mail_search", hours=48),
+            (text("Pomněnice: [E-I101] vyžaduje odpověď. Návrh: Dobrý den, děkuji"), "max_tokens"),
+            (text(" za vyjádření. S pozdravem"), "end_turn"),
+        ]
+    )
+    reply = await ChatService(sessions, llm, cfg(), ToolRegistry(tools())).handle(msg())
+    assert reply is not None
+    assert reply.text.endswith("děkuji za vyjádření. S pozdravem")
+    cont = llm.calls[2]["messages"]
+    assert cont[-1].content.startswith("Pokračuj přesně tam")
+
+
+async def test_empty_answer_after_thinking_gets_bigger_budget(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    llm = FakeLLM(
+        script=[
+            tool("mail_search"),
+            ([], "max_tokens"),  # limit spotřeboval rozmysl, žádný text
+            (text("Přehled pošty…"), "end_turn"),
+        ]
+    )
+    reply = await ChatService(sessions, llm, cfg(), ToolRegistry(tools())).handle(msg())
+    assert reply is not None and reply.text == "Přehled pošty…"
+    assert llm.calls[2]["max_tokens"] == 2 * llm.calls[1]["max_tokens"]
+
+
+async def test_empty_answer_is_reported_as_error_not_blank(
+    sessions: async_sessionmaker[AsyncSession], session: AsyncSession
+) -> None:
+    events: list[str] = []
+
+    async def notify(t: str) -> None:
+        events.append(t)
+
+    llm = FakeLLM(script=[([], "max_tokens")])
+    reply = await ChatService(sessions, llm, cfg(), ToolRegistry(tools()), notify=notify).handle(
+        msg()
+    )
+    assert reply is not None and "nevrátil žádný text" in reply.text and "max_tokens" in reply.text
+    run = await session.get_one(AgentRun, reply.run_id)
+    assert run.status.value == "error" and "max_tokens" in (run.error or "")
+    assert len(events) == 1
+    assert len(llm.calls) == 3  # původní pokus + 2 opakování
+
+
+def test_default_output_limit_fits_mail_triage() -> None:
+    assert Settings().llm_max_output_tokens >= 8000

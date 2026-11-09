@@ -53,6 +53,11 @@ class LLMResult:
     stop_reason: str | None = None
 
     @property
+    def raw_text(self) -> str:
+        """Text bez ořezání mezer – pro spojování pokračujících částí odpovědi."""
+        return "".join(b.text for b in self.blocks if isinstance(b, TextBlock))
+
+    @property
     def text(self) -> str:
         return "".join(b.text for b in self.blocks if isinstance(b, TextBlock)).strip()
 

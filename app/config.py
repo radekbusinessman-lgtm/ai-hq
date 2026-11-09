@@ -34,7 +34,8 @@ class Settings(BaseSettings):
     llm_model_briefing: str = "claude-opus-5-5"
     voyage_api_key: SecretStr | None = None
     anthropic_key_expires_on: date | None = None  # pro upozornění v briefingu
-    llm_max_output_tokens: int = 2000
+    llm_max_output_tokens: int = 8000
+    llm_max_continuations: int = 2  # pokračování, když odpověď narazí na limit délky
     conversation_history_messages: int = 20
 
     # Ceny v USD za 1M tokenů (vstup, výstup). Záměrně opatrné (spíš vyšší) výchozí hodnoty –
