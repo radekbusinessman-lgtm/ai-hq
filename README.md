@@ -1,5 +1,7 @@
 # AI HQ – Autonomous Business Operating System
 
+> **Projekt pozastaven 24. 11. 2026.** Archiv, seznam služeb a návod na obnovu: [docs/ARCHIV-A-OBNOVA.md](docs/ARCHIV-A-OBNOVA.md)
+
 Vlastní AI Chief of Staff. Rozhraní: Discord. Paměť: PostgreSQL (Supabase) s pgvector.
 AI: Claude API. Pilotní projekt: **Osada Pomněnice**.
 
