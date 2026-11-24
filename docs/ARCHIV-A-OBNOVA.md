@@ -12,7 +12,7 @@ databáze, účtů a předplatných). Cílem bylo šetřit čas, ne spravovat in
 | Rozhodnutí a architektura | `docs/decisions/0001–0004` | Orchestrátor, hosting, oddělení firem, iCloud pošta |
 | Konfigurace bez klíčů | `.env.example`, `docker-compose.yml`, `Dockerfile` | Žádné klíče ani hesla nejsou v Gitu |
 | Databáze (záloha) | Mac mini: `~/ai-hq/backups/aihq-RRRR-MM-DD.dump` a `~/ai-hq-zaloha/` | **Záloha není v Gitu** (obsahuje firemní data). Formát `pg_dump -Fc`, Postgres 17 |
-| Poslední ověřená záloha | `aihq-2026-11-24.dump` (88 kB) | Ověřeno 24. 11. 2026: čitelná přes `pg_restore` 17, 17 tabulek (66 zpráv, 33 běhů agenta, 8 faktů, 73 auditních záznamů, 1 projekt, 1 úkol) |
+| Závěrečná záloha | `aihq-ZAVERECNA-20261124-1903.dump` (88 kB), kopie v `~/ai-hq-zaloha/databaze/` | Pořízena těsně před zastavením, ověřena přes `pg_restore` 17: 17 tabulek (68 zpráv, 34 běhů agenta, 8 faktů, 75 auditních záznamů, 1 projekt, 1 úkol) |
 | Git bundly (starší) | Mac mini: `~/ai-hq-zaloha/*.bundle` | Kopie repozitáře k 6. 11. 2026 |
 
 ## Proměnné v `.env` (hodnoty nejsou archivovány)
@@ -44,6 +44,8 @@ tj. přibližně 15 USD/měsíc, hlavně denní briefingy.
    (neusínat, autorestart). Nevypínat FileVault – pro uložení hesla k iCloudu je nutný.
 
 ## Ukončení provozu – postup
+
+Provedeno 24. 11. 2026 v 19:03 skriptem `scripts/3-zastavit-ai-hq.command` (log v `~/ai-hq/logs/`).
 
 1. Poslední záloha: `docker compose run --rm backup /scripts/backup.sh --now`
 2. Zastavení: `cd ~/ai-hq && docker compose down` (odstraní kontejnery `app` a `backup`,
